@@ -1,0 +1,73 @@
+{
+  "strategies": {
+    "oil": {
+      "st_multiplier": 1.5,
+      "st_period": 100,
+      "vpt_len": 10,
+      "vpt_ema_length": 14,
+      "base_timeframe": "Min15",
+      "use_rsi_filter": false,
+      "use_macd_filter": false,
+      "use_adx_filter": false,
+      "rsi_period": 7,
+      "rsi_min": 35,
+      "rsi_max": 65,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "macd_threshold": 0.0,
+      "sltp_mode": "ATR",
+      "sl_atr_mult": 2.0,
+      "tp_atr_mult": 3.0,
+      "min_rr": 1.0,
+      "use_trailing": true,
+      "trail_offset": 1.5,
+      "channel_buffer": 0.0,
+      "risk_per_trade": 1.0,
+      "max_leverage": 200.0,
+      "timeframes": [
+        "Min5",
+        "Min15",
+        "Min60",
+        "Hour4"
+      ]
+    },
+    "silver": {
+      "st_multiplier": 2.2,
+      "st_period": 100,
+      "vpt_len": 10,
+      "vpt_ema_length": 10,
+      "base_timeframe": "Min15",
+      "use_rsi_filter": true,
+      "use_macd_filter": true,
+      "use_adx_filter": false,
+      "rsi_period": 7,
+      "rsi_min": 35,
+      "rsi_max": 65,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "macd_threshold": 0.0,
+      "sltp_mode": "ATR",
+      "sl_atr_mult": 2.0,
+      "tp_atr_mult": 3.0,
+      "min_rr": 1.0,
+      "use_trailing": true,
+      "trail_offset": 1.5,
+      "channel_buffer": 0.0,
+      "risk_per_trade": 1.0,
+      "max_leverage": 200.0,
+      "timeframes": [
+        "Min5",
+        "Min15",
+        "Min60",
+        "Hour4"
+      ]
+    }
+  },
+  "system": {
+    "bot_name": "تولين",
+    "developer": "بسام الحوباني",
+    "version": "V14.0-REBUILT"
+  }
+}
