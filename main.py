@@ -76,7 +76,7 @@ import queue
 import threading
 import re
 from flask import Flask, request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional, Any, Callable
@@ -452,6 +452,8 @@ def get_instrument_spec(asset_type: str) -> dict:
 LAST_PROCESSED_SIGNAL_CANDLE = {"eurusd": None, "usdjpy": None}
 SIGNAL_DEDUPE_LOCK = threading.RLock()
 logger.setLevel(logging.INFO)
+# Prevent duplicate log lines caused by propagation to the root logger.
+logger.propagate = False
 
 formatter = logging.Formatter(
     "%(asctime)s - %(levelname)s - [%(threadName)s] - [%(filename)s:%(lineno)d] - %(message)s"
@@ -2309,7 +2311,7 @@ import time
 import json
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import logging
 
@@ -2799,11 +2801,13 @@ def load_config():
     default_config = {
         "strategies": {
             "eurusd": {
-                "st_multiplier": 2.5,
+                # Forex 5-minute baseline: responsive without being excessively noisy.
+                "st_multiplier": 2.2,
                 "st_period": 50,
                 "vpt_len": 10,
                 "vpt_ema_length": 14,
-                "base_timeframe": "Min15",
+                "base_timeframe": "Min5",
+                "confirmation_bars": 1,
                 "use_rsi_filter": False,
                 "use_macd_filter": False,
                 "use_adx_filter": False,
@@ -2825,11 +2829,13 @@ def load_config():
                 "max_leverage": 200.0,
             },
             "usdjpy": {
+                # USD/JPY 5-minute baseline: slightly slower to reduce whipsaws.
                 "st_multiplier": 2.5,
-                "st_period": 100,
+                "st_period": 60,
                 "vpt_len": 10,
                 "vpt_ema_length": 10,
-                "base_timeframe": "Min15",
+                "base_timeframe": "Min5",
+                "confirmation_bars": 1,
                 "use_rsi_filter": False,
                 "use_macd_filter": False,
                 "use_adx_filter": False,
@@ -2866,6 +2872,24 @@ def load_config():
                 for sub_key, sub_val in val.items():
                     if sub_key not in cloud[key]:
                         cloud[key][sub_key] = sub_val
+
+        # V14 Forex strategy baseline: explicitly pin the strategy values requested for
+        # this build so an older Gist configuration cannot silently restore Min15/old ST.
+        forex_baseline = {
+            "eurusd": {
+                "st_multiplier": 2.2, "st_period": 50, "vpt_len": 10,
+                "vpt_ema_length": 14, "base_timeframe": "Min5",
+                "confirmation_bars": 1
+            },
+            "usdjpy": {
+                "st_multiplier": 2.5, "st_period": 60, "vpt_len": 10,
+                "vpt_ema_length": 10, "base_timeframe": "Min5",
+                "confirmation_bars": 1
+            }
+        }
+        for _asset, _vals in forex_baseline.items():
+            cloud.setdefault("strategies", {}).setdefault(_asset, {}).update(_vals)
+
         return cloud
     except:
         return default_config
@@ -3453,151 +3477,100 @@ def get_learning_data_source() -> str:
 # 📦 PART 11: دوال Telegram و API
 # ====================================================================================
 
-# ====================================================================================
-# Forex data provider: Twelve Data only (research/simulation; no order execution)
-# ====================================================================================
-TWELVE_DATA_CACHE = {}
-TWELVE_DATA_CACHE_LOCK = threading.RLock()
-TWELVE_DATA_RATE_LOCK = threading.Lock()
-TWELVE_DATA_LAST_REQUEST = 0.0
-TWELVE_DATA_MIN_INTERVAL = float(os.getenv("TWELVE_DATA_MIN_INTERVAL", "3.0"))
-TWELVE_DATA_CACHE_TTL = int(os.getenv("TWELVE_DATA_CACHE_TTL", "45"))
-TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
-
-
-def _normalize_forex_symbol(symbol):
-    normalized = str(symbol or "").upper().replace("/", "").replace("_", "")
-    mapping = {"EURUSD": "EUR/USD", "USDJPY": "USD/JPY"}
-    if normalized not in mapping:
-        raise ValueError(f"Unsupported Forex instrument: {symbol}")
-    return normalized, mapping[normalized]
-
-
-def _twelve_interval(interval):
-    return {
-        "Min1": "1min", "Min5": "5min", "Min15": "15min",
-        "Hour1": "1h", "Hour4": "4h", "Day1": "1day",
-    }.get(str(interval), "15min")
-
-
-def _wait_for_twelve_data_slot():
-    global TWELVE_DATA_LAST_REQUEST
-    with TWELVE_DATA_RATE_LOCK:
-        now = time.monotonic()
-        delay = TWELVE_DATA_MIN_INTERVAL - (now - TWELVE_DATA_LAST_REQUEST)
-        if delay > 0:
-            time.sleep(delay)
-        TWELVE_DATA_LAST_REQUEST = time.monotonic()
-
-
-def _parse_twelve_data_payload(payload, symbol, interval, limit):
-    if not isinstance(payload, dict):
+def get_yahoo_candles(symbol, interval="Min15", limit=1000):
+    """Research-only Yahoo Finance fallback for EUR/USD and USD/JPY."""
+    yahoo_symbol = {"EURUSD": "EURUSD=X", "USDJPY": "JPY=X"}.get(str(symbol).upper())
+    if not yahoo_symbol:
         return None
-    if payload.get("status") == "error" or payload.get("code"):
-        message = payload.get("message", "unknown Twelve Data error")
-        raise RuntimeError(str(message))
-    values = payload.get("values") or []
-    if not isinstance(values, list):
-        return None
-    rows = []
-    for item in values:
-        try:
-            timestamp = item.get("datetime")
-            if isinstance(timestamp, str):
-                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                timestamp = int(dt.timestamp())
-            else:
-                timestamp = int(float(timestamp))
-            op = float(item["open"])
-            hi = float(item["high"])
-            lo = float(item["low"])
-            cl = float(item["close"])
-            vol = float(item.get("volume") or item.get("tick_volume") or 0.0)
-            if not all(math.isfinite(x) for x in (op, hi, lo, cl, vol)):
-                continue
-            if hi < max(op, cl) or lo > min(op, cl) or hi < lo:
-                continue
-            rows.append((timestamp, op, hi, lo, cl, vol))
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
-    rows.sort(key=lambda row: row[0])
-    if rows and rows[-1][0] + _interval_seconds(interval) > int(time.time()):
-        rows.pop()
-    rows = rows[-int(limit):] if limit else rows
-    if len(rows) < 5:
-        return None
-    return {
-        "timestamps": [row[0] for row in rows],
-        "opens": [row[1] for row in rows],
-        "highs": [row[2] for row in rows],
-        "lows": [row[3] for row in rows],
-        "closes": [row[4] for row in rows],
-        "volumes": [row[5] for row in rows],
-        "source": "Twelve Data",
-        "source_symbol": symbol,
-        "is_research_data": True,
-        "data_quality": "research",
-        "provider_status": "ok",
+    interval_map = {
+        "Min1": ("1d", "1m", 60), "Min5": ("5d", "5m", 300),
+        "Min15": ("5d", "15m", 900), "Min30": ("5d", "30m", 1800),
+        "Min60": ("1mo", "60m", 3600), "Hour4": ("3mo", "60m", 14400),
+        "Day1": ("10y", "1d", 86400),
     }
-
-
-def _interval_seconds(interval):
-    return {"Min1": 60, "Min5": 300, "Min15": 900, "Hour1": 3600, "Hour4": 14400, "Day1": 86400}.get(str(interval), 900)
+    range_name, yahoo_interval, bucket_seconds = interval_map.get(interval, ("5d", "5m", 300))
+    try:
+        response = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+            params={"range": range_name, "interval": yahoo_interval, "includePrePost": "false"},
+            headers={"User-Agent": "ForexAdvisorResearch/1.0", "Accept": "application/json"},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            logger.warning(f"[ForexData] Yahoo failed: {yahoo_symbol}/{interval} status={response.status_code}")
+            return None
+        result = (response.json().get("chart", {}).get("result") or [None])[0]
+        if not result:
+            return None
+        timestamps = result.get("timestamp") or []
+        quote = ((result.get("indicators") or {}).get("quote") or [None])[0] or {}
+        rows = []
+        for i, timestamp in enumerate(timestamps):
+            try:
+                values = [quote.get(key, [])[i] for key in ("open", "high", "low", "close", "volume")]
+                if any(value is None for value in values[:4]):
+                    continue
+                rows.append((int(timestamp), *(float(value or 0) for value in values)))
+            except (IndexError, TypeError, ValueError):
+                continue
+        if interval == "Hour4":
+            grouped = {}
+            for timestamp, op, hi, lo, cl, vol in rows:
+                bucket = (timestamp // bucket_seconds) * bucket_seconds
+                if bucket not in grouped:
+                    grouped[bucket] = [op, hi, lo, cl, vol]
+                else:
+                    grouped[bucket][1] = max(grouped[bucket][1], hi)
+                    grouped[bucket][2] = min(grouped[bucket][2], lo)
+                    grouped[bucket][3] = cl
+                    grouped[bucket][4] += vol
+            rows = [(ts, *values) for ts, values in sorted(grouped.items())]
+        rows.sort(key=lambda row: row[0])
+        if rows and rows[-1][0] + bucket_seconds > int(time.time()):
+            rows.pop()
+        rows = rows[-int(limit):] if limit else rows
+        if len(rows) < 5:
+            return None
+        return {
+            "timestamps": [row[0] for row in rows], "opens": [row[1] for row in rows],
+            "highs": [row[2] for row in rows], "lows": [row[3] for row in rows],
+            "closes": [row[4] for row in rows], "volumes": [row[5] for row in rows],
+            "source": "Yahoo Finance research fallback", "source_symbol": yahoo_symbol,
+            "is_research_data": True,
+        }
+    except Exception as e:
+        logger.warning(f"[ForexData] Yahoo exception: {yahoo_symbol}/{interval}: {e}")
+        return None
 
 
 def get_forex_candles(symbol, interval="Min15", limit=1000):
-    """Fetch research candles from Twelve Data with shared throttling and cache."""
-    normalized, api_symbol = _normalize_forex_symbol(symbol)
-    interval = str(interval)
-    limit = max(5, min(int(limit), 5000))
-    api_key = os.getenv("TWELVE_DATA_API_KEY", "").strip()
-    if not api_key:
-        logger.error("[ForexData] TWELVE_DATA_API_KEY is missing")
-        return None
-    cache_key = (normalized, interval, limit)
-    now = time.monotonic()
-    with TWELVE_DATA_CACHE_LOCK:
-        cached = TWELVE_DATA_CACHE.get(cache_key)
-        if cached and now - cached["stored_at"] < TWELVE_DATA_CACHE_TTL:
-            return cached["data"]
-    params = {
-        "symbol": api_symbol,
-        "interval": _twelve_interval(interval),
-        "outputsize": limit,
-        "apikey": api_key,
-        "timezone": "UTC",
-        "format": "JSON",
-    }
-    last_error = "unknown_error"
-    for attempt in range(3):
+    """Fetch Forex research bars from an optional provider, then Yahoo fallback.
+
+    FOREX_DATA_URL, when configured, must return the normalized OHLCV schema used below.
+    No order execution is performed by this function.
+    """
+    symbol = str(symbol).upper().replace("/", "")
+    provider_url = os.getenv("FOREX_DATA_URL", "").strip()
+    if provider_url:
         try:
-            _wait_for_twelve_data_slot()
             response = requests.get(
-                TWELVE_DATA_BASE_URL,
-                params=params,
+                provider_url,
+                params={"symbol": symbol, "interval": interval, "limit": int(limit)},
                 headers={"Accept": "application/json", "User-Agent": "ForexAdvisorResearch/1.0"},
-                timeout=20,
+                timeout=12,
             )
-            if response.status_code == 429:
-                last_error = "rate_limited"
-                time.sleep(min(60, 5 * (2 ** attempt)))
-                continue
             response.raise_for_status()
-            data = _parse_twelve_data_payload(response.json(), normalized, interval, limit)
-            if data is None:
-                last_error = "empty_or_insufficient_data"
-                break
-            with TWELVE_DATA_CACHE_LOCK:
-                TWELVE_DATA_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
-            return data
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt < 2:
-                time.sleep(min(30, 3 * (2 ** attempt)))
-    logger.warning(f"[ForexData] Twelve Data failed: {api_symbol}/{interval} reason={last_error}")
-    return None
+            payload = response.json()
+            data = payload.get("data", payload) if isinstance(payload, dict) else None
+            if isinstance(data, dict) and all(data.get(k) for k in ("closes", "highs", "lows", "opens")):
+                data.setdefault("volumes", [0.0] * len(data["closes"]))
+                data.setdefault("timestamps", list(range(len(data["closes"]))))
+                data["source"] = data.get("source", "configured_forex_provider")
+                data["is_research_data"] = True
+                return data
+        except Exception as e:
+            logger.warning(f"[ForexData] configured provider failed for {symbol}/{interval}: {e}")
+    return get_yahoo_candles(symbol, interval, limit)
 
 def fetch_multiple_timeframes(symbol, timeframes):
     results = {}
@@ -6354,7 +6327,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
         lows = data["lows"]
         volumes = data["volumes"]
         
-        # ── حساب المؤشرات على الفريم الأساسي (5 دقائق) ──
+        # ── حساب المؤشرات على الفريم الأساسي للاستراتيجية (5 دقائق) ──
         current_price = closes[-1]
         current_rsi = calculate_rsi_7(closes)[-1] if len(closes) >= 7 else None
         current_macd = calculate_macd_histogram(closes)[-1] if len(closes) >= 35 else None
@@ -6382,13 +6355,17 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
             avg_vol = sum(volumes[-20:-1]) / 19 if len(volumes) > 20 else current_vol
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
         
-        # SuperTrend
-        st_line_arr, trend, _ = calculate_supertrend_vpt_correct(
-            data,
-            st_mult=2.5 if asset_type == "eurusd" else 2.2,
-            st_period=100,
-            vpt_len=10
+        # SuperTrend — use the same protected Forex strategy parameters as the scanner.
+        _strategy_cfg = load_config().get("strategies", {}).get(asset_type, {})
+        _st_mult = float(_strategy_cfg.get("st_multiplier", 2.2 if asset_type == "eurusd" else 2.5))
+        _st_period = int(_strategy_cfg.get("st_period", 50 if asset_type == "eurusd" else 60))
+        _vpt_len = int(_strategy_cfg.get("vpt_len", 10))
+        _st_calc = calculate_supertrend_vpt_correct(
+            data, st_mult=_st_mult, st_period=_st_period, vpt_len=_vpt_len
         )
+        if _st_calc is None:
+            return None, "⚠️ تعذر حساب SuperTrend للفريم الأساسي."
+        st_line_arr, trend, _ = _st_calc
         
         # ── ✅ تحليل الفريمات الأربعة (القاعدة الذهبية) ──
         timeframes = {
@@ -6410,7 +6387,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
                 tf_atr = calculate_atr_14(tf_data)
                 
                 # SuperTrend لكل فريم
-                st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=2.5 if asset_type == "eurusd" else 2.2)
+                st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=_st_mult, st_period=_st_period, vpt_len=_vpt_len)
                 if st_result is not None and len(st_result) == 3:
                     st_l, tr, _ = st_result
                     st_line = st_l[-1] if st_l else None
@@ -8074,8 +8051,8 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     strategy_config = config["strategies"][asset_type]
 
     base_timeframe = strategy_config.get("base_timeframe", "Min5")
-    st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
-    st_period = strategy_config.get("st_period", 100)
+    st_multiplier = strategy_config.get("st_multiplier", 2.2 if asset_type == "eurusd" else 2.5)
+    st_period = strategy_config.get("st_period", 50 if asset_type == "eurusd" else 60)
     vpt_len = strategy_config.get("vpt_len", 10)
 
     sltp_mode = strategy_config.get("sltp_mode", "ATR")
@@ -8310,7 +8287,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     for tf_name, tf_data in [("5m", results.get("5m")), ("15m", results.get("15m")), ("1h", results.get("1h")), ("4h", results.get("4h"))]:
         if tf_data and tf_data.get("closes") and len(tf_data["closes"]) >= 10:
             tcloses = tf_data["closes"]
-            st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=st_multiplier)
+            st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=st_multiplier, st_period=st_period, vpt_len=vpt_len)
             if st_result is not None and len(st_result) == 3:
                 st_l, tr, vpt_tf = st_result
                 tf_rsi = calculate_rsi_7(tcloses)[-1] if len(tcloses) >= 7 else None
@@ -8674,7 +8651,8 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
             tf_status = "ضعيف"
         lines.append(f"   • توافق الاتجاهات: {tf_status}")
 
-        vol_ratio = analysis.get("timeframes", {}).get("15m", {}).get("volume_ratio")
+        vol_key = base_timeframe.replace("Min", "m")
+        vol_ratio = analysis.get("timeframes", {}).get(vol_key, {}).get("volume_ratio")
         if vol_ratio is not None:
             vol_status = "جيد" if vol_ratio > 1.5 else "طبيعي" if vol_ratio > 0.7 else "ضعيف"
         else:
@@ -9474,7 +9452,7 @@ import json
 import re
 import requests
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 # ============================================================================
 # استيراد Gemini (اختياري)
@@ -11593,7 +11571,7 @@ class ConversationOrchestrator:
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 # ============================================================================
@@ -12827,7 +12805,7 @@ import json
 import time
 import requests
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 
 # ====================================================================================
@@ -14217,7 +14195,7 @@ from typing import Dict, List, Optional, Any
 
 def signal_scanner():
     """ماسح الإشارات - يعمل كل 60 ثانية"""
-    logger.info("[Scanner] بدأ التشغيل")
+    logger.info("[Scanner] بدأ التشغيل - EUR/USD وUSD/JPY كل 60 ثانية على Min5")
     while True:
         start = time.time()
         for asset_type in ["eurusd", "usdjpy"]:
@@ -14746,8 +14724,8 @@ def should_send_daily_report():
 
 def send_daily_report():
     try:
-        eurusd_data = get_forex_candles("EURUSD", "Min15", 50)
-        usdjpy_data = get_forex_candles("USDJPY", "Min15", 50)
+        eurusd_data = get_forex_candles("EURUSD", "Min5", 50)
+        usdjpy_data = get_forex_candles("USDJPY", "Min5", 50)
         if not eurusd_data or not usdjpy_data:
             return
 
@@ -14829,7 +14807,7 @@ import json
 import os
 import time
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from collections import defaultdict
 
@@ -16994,7 +16972,7 @@ def close_trade_virtual(asset_type, reason="أمر افتراضي", current_pric
 STRATEGY_PROTECTION = {
     "scanner": "signal_scanner",
     "interval_seconds": SIGNAL_CHECK_INTERVAL,
-    "strategy": "SuperTrend/VPT original",
+    "strategy": "SuperTrend/VPT original - Forex 5m baseline",
     "learning_can_modify_scanner": False,
     "learning_can_modify_strategy_parameters": False,
 }
@@ -17013,7 +16991,7 @@ if __name__ == "__main__":
     logger = logging.getLogger("TonaPrometheus")
 
     print("\n" + "=" * 60)
-    print("🔥 تولين AI Prometheus Edition V13.0 - الإطلاق النهائي")
+    print("🔥 تولين AI Prometheus Edition V14.0 Forex - الإطلاق النهائي")
     print("💙 الاسم الشخصي: تولين (الروح الجديدة)")
     print("👨‍💻 المطور: بسام الحوباني")
     print("🧠 جميع المحركات تعمل بشكل كامل")
