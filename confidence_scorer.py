@@ -32,7 +32,7 @@ class ConfidenceScorer:
             "fair": 0.40
         }
     
-    def calculate(self, analysis: Dict, signal: str, trade_context: Dict, asset_type: str = "oil") -> Dict:
+    def calculate(self, analysis: Dict, signal: str, trade_context: Dict, asset_type: str = "eurusd") -> Dict:
         """حساب درجة الثقة الكاملة من بيانات حقيقية مع تحليل التوافق"""
         scores = {}
         

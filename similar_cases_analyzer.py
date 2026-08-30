@@ -19,7 +19,7 @@ class SimilarCasesAnalyzer:
         self.cache = {}
     
     def find_similar(self, current_analysis: Dict, signal: str, 
-                     asset_type: str = "oil", limit: int = 50) -> Optional[Dict]:
+                     asset_type: str = "eurusd", limit: int = 50) -> Optional[Dict]:
         """
         البحث عن حالات مشابهة من قاعدة التعلم الحقيقية
         

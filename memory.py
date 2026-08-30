@@ -377,7 +377,7 @@ class Memory:
                 return {
                     "trading_style": row[0] or "neutral",
                     "risk_tolerance": row[1] or "moderate",
-                    "preferred_assets": row[2].split(",") if row[2] else ["oil", "silver"],
+                    "preferred_assets": row[2].split(",") if row[2] else ["eurusd", "usdjpy"],
                     "message_count": row[3] or 0,
                     "last_mood": row[4] or "neutral",
                     "experience_level": row[5] or "beginner",
@@ -388,7 +388,7 @@ class Memory:
             return {
                 "trading_style": "neutral",
                 "risk_tolerance": "moderate",
-                "preferred_assets": ["oil", "silver"],
+                "preferred_assets": ["eurusd", "usdjpy"],
                 "message_count": 0,
                 "last_mood": "neutral",
                 "experience_level": "beginner",
@@ -400,7 +400,7 @@ class Memory:
             return {
                 "trading_style": "neutral",
                 "risk_tolerance": "moderate",
-                "preferred_assets": ["oil", "silver"],
+                "preferred_assets": ["eurusd", "usdjpy"],
                 "message_count": 0,
                 "last_mood": "neutral"
             }

@@ -489,7 +489,7 @@ class AIBrain:
 
     def evaluate_entry(self, snapshot: dict) -> Dict:
         """تقييم إشارة دخول جديدة"""
-        asset = snapshot.get("asset", "oil")
+        asset = snapshot.get("asset", "eurusd")
         trade_type = snapshot.get("type", "BUY")
         rsi = snapshot.get("rsi_fast_7", 50)
         adx = snapshot.get("adx_14", 15)
@@ -518,7 +518,7 @@ class AIBrain:
 
     def evaluate_monitoring(self, snapshot: dict, trade_id: str = "") -> Dict:
         """تقييم لقطة مراقبة دورية"""
-        asset = snapshot.get("asset", "oil")
+        asset = snapshot.get("asset", "eurusd")
         trade_type = snapshot.get("trade_type", "BUY")
         rsi = snapshot.get("rsi", 50)
         adx = snapshot.get("adx", 15)
@@ -543,7 +543,7 @@ class AIBrain:
         try:
             context = TradeContext(
                 trade_id=trade_data.get("trade_id", str(time.time())),
-                asset_type=trade_data.get("asset_type", "oil"),
+                asset_type=trade_data.get("asset_type", "eurusd"),
                 entry_price=trade_data.get("entry_price", 0),
                 exit_price=trade_data.get("exit_price", 0),
                 trade_type=trade_data.get("type", "UNKNOWN"),
@@ -589,7 +589,7 @@ if __name__ == "__main__":
 
     # مثال تقييم دخول
     snapshot = {
-        "asset": "oil",
+        "asset": "eurusd",
         "type": "BUY",
         "rsi_fast_7": 35,
         "adx_14": 28,

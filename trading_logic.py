@@ -49,7 +49,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     
     base_timeframe = strategy_config.get("base_timeframe", "Min15")
     
-    st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "oil" else 2.2)
+    st_multiplier = strategy_config.get("st_multiplier", 2.2 if asset_type == "eurusd" else 2.5)
     st_period = strategy_config.get("st_period", 100)
     vpt_len = strategy_config.get("vpt_len", 10)
     
@@ -67,7 +67,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     min_rr = strategy_config.get("min_rr", 1.0)
     channel_buffer = strategy_config.get("channel_buffer", 0.0)
     
-    symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
+    symbol = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
     
     logger.info(f"📊 استخدام الفريم الزمني {base_timeframe} لـ {asset_type}")
     
@@ -211,7 +211,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
         else:
             sl = tp = price
     
-    asset_label = "النفط الخام" if asset_type == "oil" else "الفضة"
+    asset_label = "اليورو/دولار" if asset_type == "eurusd" else "الدولار/ين"
     sig_label = "🟢 شراء (BUY)" if signal == "BUY" else "🔴 بيع (SELL)" if signal == "SELL" else "⚪ انتظار (WAIT)"
     
     analysis = {

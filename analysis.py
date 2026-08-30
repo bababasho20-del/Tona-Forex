@@ -503,7 +503,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
                     report = "⚠️ تحليل غير متوفر"
                 return cached, report
         
-        symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
+        symbol = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
         data = get_mexc_candles(symbol, interval="Min15", limit=80)
         
         if not data or not data.get("closes") or len(data["closes"]) < 10:
@@ -539,7 +539,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
         
         st_line_arr, trend, _ = calculate_supertrend_vpt_correct(
             data,
-            st_mult=2.5 if asset_type == "oil" else 2.2,
+            st_mult=2.2 if asset_type == "eurusd" else 2.5,
             st_period=100,
             vpt_len=10
         )
@@ -555,7 +555,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
         for tf_name, tf_data in [("5m", results.get("5m")), ("1h", results.get("1h")), ("4h", results.get("4h"))]:
             if tf_data and tf_data.get("closes") and len(tf_data["closes"]) >= 10:
                 tcloses = tf_data["closes"]
-                st_l, tr, _ = calculate_supertrend_vpt_correct(tf_data, st_mult=2.5 if asset_type == "oil" else 2.2)
+                st_l, tr, _ = calculate_supertrend_vpt_correct(tf_data, st_mult=2.2 if asset_type == "eurusd" else 2.5)
                 timeframes[tf_name] = {
                     "price": tcloses[-1],
                     "trend": "صاعد" if tr[-1] == 1 else "هابط" if tr[-1] == -1 else "محايد",
@@ -1386,7 +1386,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
                     report = "⚠️ تحليل غير متوفر"
                 return cached, report
         
-        symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
+        symbol = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
         data = get_mexc_candles(symbol, interval="Min15", limit=80)
         
         if not data or not data.get("closes") or len(data["closes"]) < 10:
@@ -1422,7 +1422,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
         
         st_line_arr, trend, _ = calculate_supertrend_vpt_correct(
             data,
-            st_mult=2.5 if asset_type == "oil" else 2.2,
+            st_mult=2.2 if asset_type == "eurusd" else 2.5,
             st_period=100,
             vpt_len=10
         )
@@ -1438,7 +1438,7 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
         for tf_name, tf_data in [("5m", results.get("5m")), ("1h", results.get("1h")), ("4h", results.get("4h"))]:
             if tf_data and tf_data.get("closes") and len(tf_data["closes"]) >= 10:
                 tcloses = tf_data["closes"]
-                st_l, tr, _ = calculate_supertrend_vpt_correct(tf_data, st_mult=2.5 if asset_type == "oil" else 2.2)
+                st_l, tr, _ = calculate_supertrend_vpt_correct(tf_data, st_mult=2.2 if asset_type == "eurusd" else 2.5)
                 timeframes[tf_name] = {
                     "price": tcloses[-1],
                     "trend": "صاعد" if tr[-1] == 1 else "هابط" if tr[-1] == -1 else "محايد",

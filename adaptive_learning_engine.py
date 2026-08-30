@@ -175,7 +175,7 @@ class AdaptiveLearningEngine:
                     trades = self.learning_db.get_trades_by_asset(asset_type, limit)
                 else:
                     trades = []
-                    for asset in ("oil", "silver"):
+                    for asset in ("eurusd", "usdjpy"):
                         trades.extend(self.learning_db.get_trades_by_asset(asset, limit))
             except Exception as e:
                 logger.warning("⚠️ تعذر جلب التاريخ من SQLite: %s", e)

@@ -116,7 +116,7 @@ class DatabaseManager:
                 user_id TEXT PRIMARY KEY,
                 trading_style TEXT DEFAULT 'neutral',
                 risk_tolerance TEXT DEFAULT 'moderate',
-                preferred_assets TEXT DEFAULT 'oil,silver',
+                preferred_assets TEXT DEFAULT 'eurusd,usdjpy',
                 message_count INTEGER DEFAULT 0,
                 last_mood TEXT DEFAULT 'neutral',
                 last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,

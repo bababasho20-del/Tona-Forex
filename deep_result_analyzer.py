@@ -133,7 +133,7 @@ class DeepResultAnalyzer:
                     file_trades = data.get('trades', [])
                     if file_trades:
                         # إضافة نوع الأصل للصفقات
-                        asset = 'oil' if 'oil' in file_path else 'silver'
+                        asset = 'eurusd' if 'eurusd' in file_path else 'usdjpy'
                         for t in file_trades:
                             if 'asset_type' not in t:
                                 t['asset_type'] = asset
@@ -155,7 +155,7 @@ class DeepResultAnalyzer:
     
     def _get_asset_file(self, asset_type: str) -> str:
         """الحصول على اسم ملف الأصول"""
-        return "trades_history_oil.json" if asset_type == "oil" else "trades_history_silver.json"
+        return "trades_history_eurusd.json" if asset_type == "eurusd" else "trades_history_usdjpy.json"
     
     def _no_data_response(self, asset_type: Optional[str]) -> Dict:
         """رد عند عدم وجود بيانات"""
@@ -183,7 +183,7 @@ class DeepResultAnalyzer:
         """الحصول على تسمية الأصل"""
         if not asset_type or asset_type == 'all':
             return ''
-        return 'للنفط' if asset_type == 'oil' else 'للفضة'
+        return 'لليورو/دولار' if asset_type == 'eurusd' else 'للدولار/ين'
     
     def _analyze_real_trades(self, trades: List[Dict], asset_type: Optional[str]) -> Dict:
         """

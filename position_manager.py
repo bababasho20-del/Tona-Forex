@@ -150,7 +150,7 @@ def load_config():
                     if sub_key not in cloud[key]:
                         cloud[key][sub_key] = sub_val
                     elif isinstance(sub_val, dict):
-                        for asset in ["oil", "silver"]:
+                        for asset in ["eurusd", "usdjpy"]:
                             if asset in cloud["strategies"]:
                                 for new_key, new_val in sub_val.items():
                                     if new_key not in cloud["strategies"][asset]:
@@ -346,7 +346,7 @@ def calculate_statistics(asset_type):
 def get_last_closed_trade(asset_type=None):
     """الحصول على آخر صفقة مغلقة"""
     all_trades = []
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         history = load_trades_history(asset)
         for trade in history.get("trades", []):
             if trade.get("status") == "closed":
@@ -462,7 +462,7 @@ def cleanup_stuck_trades_on_startup():
     cleaned = 0
     added = 0
     
-    for asset_type in ["oil", "silver"]:
+    for asset_type in ["eurusd", "usdjpy"]:
         pos_file = get_position_file(asset_type)
         
         if not os.path.exists(pos_file):
@@ -847,7 +847,7 @@ def record_warning(open_trade, warning_type, level, current_price, message):
         "message": message[:100]
     })
 
-    asset_type = open_trade.get("asset_type", "oil")
+    asset_type = open_trade.get("asset_type", "eurusd")
     pos_file = get_position_file(asset_type)
     try:
         with open(pos_file, 'w', encoding='utf-8') as f:
@@ -863,7 +863,7 @@ def record_recommendation(open_trade, recommendation_type, message):
 
     open_trade["recommendations_sent"].append(recommendation_type)
 
-    asset_type = open_trade.get("asset_type", "oil")
+    asset_type = open_trade.get("asset_type", "eurusd")
     pos_file = get_position_file(asset_type)
     try:
         with open(pos_file, 'w', encoding='utf-8') as f:

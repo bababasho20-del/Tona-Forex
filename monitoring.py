@@ -39,7 +39,7 @@ def signal_scanner():
     logger.info("[Scanner] بدأ التشغيل")
     while True:
         start = time.time()
-        for asset_type in ["oil", "silver"]:
+        for asset_type in ["eurusd", "usdjpy"]:
             try:
                 analyze_and_send(asset_type, is_manual=False)
             except Exception as e:
@@ -74,7 +74,7 @@ def deep_monitor():
         except:
             pass
         
-        for asset_type in ["oil", "silver"]:
+        for asset_type in ["eurusd", "usdjpy"]:
             should_run = False
             reason = "scheduled"
             if now - last_scheduled[asset_type] >= MONITORING_INTERVAL:
@@ -329,7 +329,7 @@ def health_check():
         except:
             pass
         
-        for asset in ["oil", "silver"]:
+        for asset in ["eurusd", "usdjpy"]:
             trade = get_current_open_trade(asset)
             if trade:
                 logger.info(f"[Health] 📊 صفقة {asset} مفتوحة: {trade.get('type')} @ ${trade.get('entry_price', 0):.2f}")

@@ -43,7 +43,7 @@ def format_concise_analysis(analysis, asset_type, is_monitoring=False, open_trad
     metrics = result.get("metrics", {})
     
     # ── استخراج المتغيرات ──
-    asset_label = "النفط الخام" if asset_type == "oil" else "الفضة"
+    asset_label = "اليورو/دولار" if asset_type == "eurusd" else "الدولار/ين"
     price = metrics.get("price", 0)
     support = metrics.get("support", price * 0.98)
     resistance = metrics.get("resistance", price * 1.02)
@@ -668,12 +668,12 @@ class HOBANYAdvisor:
         # 5. الصفقات المفتوحة
         if self.check_position_func:
             try:
-                oil_trade = self.check_position_func("oil")
-                silver_trade = self.check_position_func("silver")
+                oil_trade = self.check_position_func("eurusd")
+                silver_trade = self.check_position_func("usdjpy")
                 if oil_trade:
-                    context["open_trades"]["oil"] = oil_trade
+                    context["open_trades"]["eurusd"] = oil_trade
                 if silver_trade:
-                    context["open_trades"]["silver"] = silver_trade
+                    context["open_trades"]["usdjpy"] = silver_trade
             except Exception as e:
                 logging.warning("⚠️ جلب الصفقات فشل: %s", e)
 
@@ -729,7 +729,7 @@ class HOBANYAdvisor:
 
         lines = ["📋 **صفقاتك المفتوحة:**"]
         for asset, trade in open_trades.items():
-            asset_label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
+            asset_label = "💶 اليورو/دولار" if asset == "eurusd" else "💴 الدولار/ين"
             lines.append(f"{asset_label}: {trade.get('type', 'N/A')} | الدخول: ${trade.get('entry_price', 0):.2f}")
 
         return "\n".join(lines)
@@ -989,9 +989,9 @@ class HOBANYAdvisor:
             return "❌ **تولين:** لا توجد صفقات مفتوحة للإغلاق يا صديقي."
 
         msg = "❌ **تولين:** لإغلاق صفقة يا صديقي:\n"
-        if "oil" in open_trades:
+        if "eurusd" in open_trades:
             msg += "• `تم إغلاق صفقة النفط`\n"
-        if "silver" in open_trades:
+        if "usdjpy" in open_trades:
             msg += "• `تم إغلاق صفقة الفضة`\n"
         msg += "\nأو اضغط على: ❌ إغلاق الصفقة"
         return msg
@@ -1019,7 +1019,7 @@ class HOBANYAdvisor:
         if open_trades:
             trades_text = "\n\n📋 **صفقاتك المفتوحة:**\n"
             for asset, trade in open_trades.items():
-                label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
+                label = "💶 اليورو/دولار" if asset == "eurusd" else "💴 الدولار/ين"
                 trades_text += f"{label}: {trade.get('type', 'N/A')}\n"
 
         responses = {
@@ -1120,7 +1120,7 @@ class HOBANYAdvisor:
         if open_trades:
             trades_text = "\n\n📋 **صفقاتك المفتوحة:**\n"
             for asset, trade in open_trades.items():
-                label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
+                label = "💶 اليورو/دولار" if asset == "eurusd" else "💴 الدولار/ين"
                 trades_text += f"{label}: {trade.get('type', 'N/A')}\n"
 
         responses = {

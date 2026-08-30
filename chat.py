@@ -206,7 +206,7 @@ def build_chat_context(text: str, chat_id: str) -> Dict:
         logger.warning("⚠️ PROMETHEUS غير متوفر أو غير مهيأ")
 
     # 6. الصفقات المفتوحة
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         try:
             trade = get_current_open_trade(asset)
             if trade:
@@ -216,7 +216,7 @@ def build_chat_context(text: str, chat_id: str) -> Dict:
 
     # 7. الصفقات المغلقة الأخيرة
     try:
-        for asset in ["oil", "silver"]:
+        for asset in ["eurusd", "usdjpy"]:
             history = load_trades_history(asset)
             trades = history.get('trades', [])
             closed = [t for t in trades if t.get('status') == 'closed']
@@ -243,7 +243,7 @@ def build_chat_context(text: str, chat_id: str) -> Dict:
 
     # 9. Market Snapshot
     try:
-        for asset in ["oil", "silver"]:
+        for asset in ["eurusd", "usdjpy"]:
             try:
                 analysis = None
                 cache_key = f"{asset}_{int(time.time() // 30)}"
@@ -304,7 +304,7 @@ def build_chat_context(text: str, chat_id: str) -> Dict:
         if hasattr(CONTEXT_MEMORY, 'get_recent_events'):
             context["recent_events"] = CONTEXT_MEMORY.get_recent_events(10)
         if hasattr(CONTEXT_MEMORY, 'get_current_regime'):
-            for asset in ["oil", "silver"]:
+            for asset in ["eurusd", "usdjpy"]:
                 regime = CONTEXT_MEMORY.get_current_regime(asset)
                 if regime:
                     context[f"regime_{asset}"] = regime
@@ -461,7 +461,7 @@ def summarize_for_ai(analysis: dict, asset: str) -> str:
 def get_recent_warnings(limit: int = 5) -> List[Dict]:
     warnings = []
     try:
-        for asset in ["oil", "silver"]:
+        for asset in ["eurusd", "usdjpy"]:
             trade = get_current_open_trade(asset)
             if trade and 'warnings_log' in trade:
                 warnings.extend(trade['warnings_log'][-limit:])
@@ -519,7 +519,7 @@ def save_current_trade(asset_type: str, trade_data: dict) -> bool:
 def tool_get_open_trades() -> str:
     """تنفيذ أداة get_open_trades - إرجاع الصفقات المفتوحة مع أرباحها"""
     result = {}
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         trade = get_current_open_trade(asset)
         if trade:
             entry = trade.get('entry_price', 0)
@@ -555,7 +555,7 @@ def tool_get_open_trades() -> str:
 
 def tool_get_market_analysis(asset_type: str, context_cache: dict = None) -> str:
     """تحليل فني شامل لأصل واحد مع جميع المؤشرات"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if context_cache and asset_type in context_cache:
@@ -572,7 +572,7 @@ def tool_get_market_analysis(asset_type: str, context_cache: dict = None) -> str
 def tool_get_both_markets_analysis(context_cache: dict = None) -> str:
     """تحليل فني شامل لكلا الأصلين مع الأسعار الحالية"""
     result = {}
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         analysis = None
         if context_cache and asset in context_cache:
             cached = context_cache[asset]
@@ -619,7 +619,7 @@ def tool_get_todays_profit_loss() -> str:
     """إجمالي ربح/خسارة اليوم من الصفقات المغلقة"""
     total = 0.0
     today = datetime.now().date()
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         history = load_trades_history(asset)
         for trade in history.get('trades', []):
             if trade.get('status') == 'closed':
@@ -642,7 +642,7 @@ def tool_get_profit_loss_by_date(days_ago: int) -> str:
         return "days_ago يجب أن يكون 0 أو أكثر"
     target_date = (datetime.now() - timedelta(days=days_ago)).date()
     total = 0.0
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         history = load_trades_history(asset)
         for trade in history.get('trades', []):
             if trade.get('status') == 'closed':
@@ -662,7 +662,7 @@ def tool_get_profit_loss_by_date(days_ago: int) -> str:
 
 def tool_get_trade_recommendation(asset_type: str, context_cache: dict = None) -> str:
     """توصية تداولية مع درجة الثقة"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if context_cache and asset_type in context_cache:
@@ -731,7 +731,7 @@ def tool_get_learning_insights() -> str:
 
 def tool_analyze_current_trade_health(asset_type: str) -> str:
     """تحليل صحة الصفقة المفتوحة وتوصية"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     open_trade = get_current_open_trade(asset_type)
@@ -783,7 +783,7 @@ def tool_get_general_statistics() -> str:
     total_wins = 0
     total_losses = 0
     total_profit = 0.0
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         stats = calculate_statistics(asset)
         total_trades += stats.get('total_trades', 0)
         total_wins += stats.get('winning_trades', 0)
@@ -802,7 +802,7 @@ def tool_get_general_statistics() -> str:
 
 def tool_execute_close_trade(asset_type: str) -> str:
     """إغلاق صفقة مفتوحة"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
     open_trade = get_current_open_trade(asset_type)
     if not open_trade:
@@ -828,7 +828,7 @@ def tool_get_intelligence_report() -> str:
 
 def tool_get_price_prediction(asset_type: str, timeframe: str = "short") -> str:
     """توقع سعر الأصل (قصير/طويل المدى) - مع استخراج صحيح للأسعار"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if ORACLE_AVAILABLE and ORACLE:
@@ -918,7 +918,7 @@ def tool_get_price_prediction(asset_type: str, timeframe: str = "short") -> str:
 
 def tool_get_trade_details(asset_type: str, trade_id: str = None) -> str:
     """تفاصيل صفقة محددة"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -940,7 +940,7 @@ def tool_get_trade_details(asset_type: str, trade_id: str = None) -> str:
 
 def tool_get_worst_best_trade(asset_type: str, period: str = "all") -> str:
     """أفضل وأسوأ صفقة"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -975,7 +975,7 @@ def tool_get_worst_best_trade(asset_type: str, period: str = "all") -> str:
 def tool_get_asset_comparison() -> str:
     """مقارنة بين النفط والفضة"""
     result = {}
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         analysis, _ = perform_comprehensive_analysis(asset, False, None)
         if analysis:
             score = analysis.get('comprehensive_score', {}).get('score', 50)
@@ -1000,10 +1000,10 @@ def tool_get_trade_history_summary(days: int = 7) -> str:
         days = 7
     cutoff = (datetime.now() - timedelta(days=days)).date()
     summary = {
-        "oil": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0},
-        "silver": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0}
+        "eurusd": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0},
+        "usdjpy": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0}
     }
-    for asset in ["oil", "silver"]:
+    for asset in ["eurusd", "usdjpy"]:
         history = load_trades_history(asset)
         for trade in history.get('trades', []):
             if trade.get('status') == 'closed':
@@ -1037,7 +1037,7 @@ def tool_get_trade_history_summary(days: int = 7) -> str:
 
 def tool_explain_decision(asset_type: str, decision_type: str = "close") -> str:
     """شرح سبب قرار معين"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -1108,7 +1108,7 @@ def tool_get_market_correlation() -> str:
 
 def tool_modify_trade_sl_tp(asset_type: str, new_sl: float = None, new_tp: float = None) -> str:
     """تعديل وقف الخسارة/الهدف لصفقة مفتوحة"""
-    if asset_type not in ["oil", "silver"]:
+    if asset_type not in ["eurusd", "usdjpy"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     open_trade = get_current_open_trade(asset_type)
@@ -1329,7 +1329,7 @@ class SmartConversationManager:
             last_trade_info = f"\n• آخر صفقة: {last_trade.get('asset', 'unknown')} | {last_trade.get('type', '?')} | {profit_emoji} ${profit:.2f}"
 
         market_summary = ""
-        for asset in ["oil", "silver"]:
+        for asset in ["eurusd", "usdjpy"]:
             snap = context.get('market_snapshot', {}).get(asset)
             if snap:
                 market_summary += f"\n• {asset}: ${snap.get('price', 0):.2f} | {snap.get('signal', 'WAIT')} | {snap.get('trend', 'محايد')} | درجة {snap.get('score', 50)}"
@@ -2289,7 +2289,7 @@ def handle_message(text, chat_id):
     if text in ["🔍 وضع الصفقة الحالية", "وضع الصفقة", "حالة", "check"]:
         def check_position():
             from analysis import analyze_open_trade
-            for asset_type in ["oil", "silver"]:
+            for asset_type in ["eurusd", "usdjpy"]:
                 open_trade = get_current_open_trade(asset_type)
                 if open_trade:
                     report = analyze_open_trade(asset_type, open_trade)
@@ -2304,7 +2304,7 @@ def handle_message(text, chat_id):
             from position_manager import calculate_statistics
             msg = "📊 <b>تقرير أداء البوت الشامل</b>\n"
             msg += "━" * 30 + "\n\n"
-            for asset_type, asset_name in [("oil", "النفط"), ("silver", "الفضة")]:
+            for asset_type, asset_name in [("eurusd", "EUR/USD"), ("usdjpy", "USD/JPY")]:
                 stats = calculate_statistics(asset_type)
                 emoji = "🛢️" if asset_type == "oil" else "🥈"
                 msg += f"{emoji} <b>{asset_name}</b>\n"
@@ -2681,7 +2681,7 @@ class HybridOrchestrator:
                 data["raw"] = tool_get_both_markets_analysis(context.get('market_snapshot', {}))
                 data["_market_query"] = True
             elif intent == "BEST_TRADE" or intent == "WORST_TRADE":
-                asset = params.get("asset_type", "oil")
+                asset = params.get("asset_type", "eurusd")
                 data["raw"] = tool_get_worst_best_trade(asset)
             elif intent == "TRADE_STATS":
                 data["raw"] = tool_get_general_statistics()
@@ -2690,14 +2690,14 @@ class HybridOrchestrator:
             elif intent == "INTELLIGENCE":
                 data["raw"] = tool_get_intelligence_report()
             elif intent == "PREDICTION":
-                asset = params.get("asset_type", "oil")
+                asset = params.get("asset_type", "eurusd")
                 timeframe = params.get("timeframe", "short")
                 data["raw"] = tool_get_price_prediction(asset, timeframe)
             elif intent == "CLOSE_TRADE":
-                asset = params.get("asset_type", "oil")
+                asset = params.get("asset_type", "eurusd")
                 data["raw"] = tool_execute_close_trade(asset)
             elif intent == "EXPLAIN_DECISION":
-                asset = params.get("asset_type", "oil")
+                asset = params.get("asset_type", "eurusd")
                 data["raw"] = tool_explain_decision(asset)
             elif intent == "WEEKLY_REPORT":
                 data["raw"] = tool_get_weekly_report()

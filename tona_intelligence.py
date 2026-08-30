@@ -162,9 +162,7 @@ class TonaEliteEngine:
             "https://feeds.bbci.co.uk/news/business/rss.xml",
             "https://feeds.bbci.co.uk/news/world/rss.xml",
             "https://www.ft.com/commodities?format=rss",
-            "https://oilprice.com/rss/energy-news",
-            "https://oilprice.com/rss/geopolitics",
-            "https://www.marketwatch.com/rss/commodities",
+                                    "https://www.marketwatch.com/rss/commodities",
             "https://www.bloomberg.com/feed/commodities",
             "https://www.aljazeera.com/xml/rss/all.xml",
             "https://www.dw.com/en/english-news/rss",
@@ -190,11 +188,11 @@ class TonaEliteEngine:
 
         if self.news_api_key and self.news_api_key != "":
             queries = [
-                ("oil OR crude OR petroleum OR OPEC", "oil"),
-                ("silver OR XAG OR gold", "silver"),
-                ("Middle East OR Iran OR Israel OR Gaza OR Houthi", "geopolitical"),
-                ("Federal Reserve OR inflation OR interest rate", "economic"),
-                ("Russia OR Ukraine OR sanctions", "geopolitical")
+                ("EUR OR euro OR ECB OR Eurozone", "eurusd"),
+                ("USD OR dollar OR Federal Reserve OR Fed OR inflation OR interest rate", "eurusd"),
+                ("JPY OR yen OR Japan OR BOJ OR Bank of Japan", "usdjpy"),
+                ("forex OR foreign exchange OR currency", "forex"),
+                ("US jobs OR payroll OR GDP OR CPI", "eurusd")
             ]
             for query, _ in queries:
                 try:
@@ -261,25 +259,14 @@ class TonaEliteEngine:
         # ✅ 2. استخدام دالة الجلب المحقونة (حقن التبعية)
         if self.candle_fetcher:
             try:
-                return self.candle_fetcher(asset_type, minutes_ago)
+                limit = min(max(abs(int(minutes_ago)) + 5, 10), 500)
+                data = self.candle_fetcher(asset_type, "Min1", limit)
+                if data and data.get("closes") and len(data["closes"]) >= abs(int(minutes_ago)) + 1:
+                    closes = data["closes"]
+                    idx = min(abs(int(minutes_ago)), len(closes) - 1)
+                    return closes[-idx - 1] if int(minutes_ago) >= 0 else closes[-1]
             except Exception as e:
-                logging.debug(f"⚠️ فشل candle_fetcher: {e}")
-
-        # ✅ 3. الحل الاحتياطي النهائي (مع تحذير لتجنب الاستيراد الدائري)
-        try:
-            from main import get_mexc_candles
-            symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
-            limit = abs(minutes_ago) + 5
-            if limit > 500:
-                limit = 500
-            data = get_mexc_candles(symbol, "Min1", limit)
-            if data and data.get("closes") and len(data["closes"]) >= abs(minutes_ago) + 1:
-                if minutes_ago >= 0:
-                    idx = min(minutes_ago, len(data["closes"]) - 1)
-                    return data["closes"][-idx - 1] if idx < len(data["closes"]) else data["closes"][-1]
-                return data["closes"][-1]
-        except Exception as e:
-            logging.debug(f"⚠️ فشل جلب السعر (حل احتياطي): {e}")
+                logging.debug(f"⚠️ فشل candle_fetcher لـ {asset_type}: {e}")
         return None
 
     def _parse_published_time(self, published_at: str) -> Optional[datetime]:
@@ -317,19 +304,25 @@ class TonaEliteEngine:
         return dt
 
     def _news_asset(self, news_item: Dict) -> str:
-        """تحديد الأصل الأكثر ارتباطاً بالخبر دون افتراض أن كل خبر للنفط."""
+        """تحديد زوج الفوركس الأكثر ارتباطاً بالخبر."""
         text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        silver_terms = ["silver", "xag", "precious metal", "فضة", "ذهب", "معادن ثمينة"]
-        oil_terms = ["oil", "crude", "brent", "wti", "opec", "petroleum", "نفط", "خام", "أوبك", "برنت"]
-        geo_terms = ["iran", "hormuz", "strait of hormuz", "houthi", "red sea", "suez", "middle east", "iran", "israel", "gaza", "yemen", "russia", "ukraine", "sanctions", "إيران", "مضيق هرمز", "البحر الأحمر", "غزة", "اليمن"]
-        ss = sum(1 for k in silver_terms if k in text)
-        oo = sum(1 for k in oil_terms if k in text)
-        gg = sum(1 for k in geo_terms if k in text)
-        if ss > oo and ss > 0:
-            return "silver"
-        if oo > 0 or gg > 0:
-            return "oil"
-        return "oil/silver"
+        eur_terms = ["eur", "euro", "europe", "ecb", "eurozone", "germany", "france", "italy", "euro area", "اليورو", "أوروبا", "المركزي الأوروبي"]
+        jpy_terms = ["jpy", "yen", "japan", "boj", "bank of japan", "tokyo", "اليابان", "الين", "بنك اليابان"]
+        usd_terms = ["usd", "dollar", "fed", "federal reserve", "united states", "us economy", "us inflation", "us jobs", "الدولار", "الفيدرالي", "الولايات المتحدة", "التضخم الأمريكي"]
+        e = sum(1 for k in eur_terms if k in text)
+        j = sum(1 for k in jpy_terms if k in text)
+        u = sum(1 for k in usd_terms if k in text)
+        if e and not j and not u:
+            return "eurusd"
+        if j and not e and not u:
+            return "usdjpy"
+        if e and (u or j):
+            return "eurusd"
+        if j and u:
+            return "usdjpy"
+        if u:
+            return "eurusd"
+        return "eurusd"
 
 
     def _news_potential(self, news_item: Dict) -> Dict:
@@ -379,14 +372,20 @@ class TonaEliteEngine:
 
 
     def _expected_news_direction(self, news_item: Dict, asset: str) -> Dict:
-        """تقدير الاتجاه الأساسي المتوقع للخبر قبل النظر إلى السعر؛ ليست إشارة تداول."""
+        """تقدير الاتجاه الأساسي المتوقع للخبر لزوج الفوركس المحدد."""
         text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        bull_oil = ["opec cut", "production cut", "supply disruption", "outage", "sanctions", "embargo", "hormuz", "attack", "war", "خفض الإنتاج", "تعطل الإمدادات", "عقوبات", "حظر", "هرمز", "هجوم", "حرب"]
-        bear_oil = ["production increase", "output increase", "supply increase", "ceasefire", "demand slowdown", "inventory build", "زيادة الإنتاج", "زيادة المعروض", "هدنة", "تباطؤ الطلب", "ارتفاع المخزونات"]
-        bull_silver = ["rate cut", "dovish", "weak dollar", "inflation rise", "safe haven", "خفض الفائدة", "دولار ضعيف", "ملاذ آمن", "ارتفاع التضخم"]
-        bear_silver = ["rate hike", "hawkish", "strong dollar", "yield increase", "رفع الفائدة", "دولار قوي", "تشدد نقدي", "ارتفاع العوائد"]
-        bull = sum(1 for x in (bull_oil if asset == "oil" else bull_silver) if x in text)
-        bear = sum(1 for x in (bear_oil if asset == "oil" else bear_silver) if x in text)
+        bull_usd = ["rate hike", "hawkish", "strong dollar", "yield increase", "fed", "رفع الفائدة", "تشدد", "دولار قوي", "ارتفاع العوائد"]
+        bear_usd = ["rate cut", "dovish", "weak dollar", "خفض الفائدة", "تيسير", "دولار ضعيف"]
+        bull_eur = ["ecb hike", "ecb hawkish", "euro strength", "رفع الفائدة الأوروبية", "تشدد المركزي الأوروبي", "قوة اليورو"]
+        bear_eur = ["ecb cut", "ecb dovish", "euro weakness", "خفض الفائدة الأوروبية", "تيسير المركزي الأوروبي", "ضعف اليورو"]
+        bull_jpy = ["boj hike", "boj hawkish", "yen strength", "رفع بنك اليابان", "تشدد بنك اليابان", "قوة الين"]
+        bear_jpy = ["boj dovish", "yen weakness", "weak yen", "تيسير بنك اليابان", "ضعف الين"]
+        if asset == "eurusd":
+            bull = sum(1 for x in bull_eur + bear_usd if x in text)
+            bear = sum(1 for x in bear_eur + bull_usd if x in text)
+        else:
+            bull = sum(1 for x in bull_usd + bull_jpy if x in text)
+            bear = sum(1 for x in bear_usd + bear_jpy if x in text)
         if bull > bear:
             return {"direction": "صعود", "strength": min(100, 50 + (bull-bear)*15), "bull_terms": bull, "bear_terms": bear}
         if bear > bull:
@@ -395,12 +394,17 @@ class TonaEliteEngine:
 
 
     def _news_relevance(self, news_item: Dict, asset: str) -> int:
-        """درجة ارتباط الخبر بالأصل حتى لا يحصل الخبر العام على وزن خبر مباشر."""
+        """درجة ارتباط الخبر بزوج الفوركس."""
         text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        direct = {"oil": ["oil", "crude", "wti", "brent", "opec", "petroleum", "نفط", "خام", "أوبك", "برنت", "إنتاج النفط", "مخزونات النفط"], "silver": ["silver", "xag", "precious metal", "industrial metals", "فضة", "المعادن الثمينة"]}[asset]
-        geo = ["iran", "hormuz", "red sea", "middle east", "israel", "gaza", "yemen", "russia", "ukraine", "sanctions", "إيران", "هرمز", "البحر الأحمر", "الشرق الأوسط", "إسرائيل", "غزة", "اليمن", "روسيا", "أوكرانيا", "عقوبات"]
-        d, g = sum(1 for x in direct if x in text), sum(1 for x in geo if x in text)
-        return min(100, 35 + d*18 + g*8) if (d or g) else 20
+        direct_map = {
+            "eurusd": ["eur", "euro", "eurozone", "ecb", "europe", "germany", "france", "اليورو", "أوروبا", "المركزي الأوروبي"],
+            "usdjpy": ["usd", "dollar", "fed", "jpy", "yen", "japan", "boj", "bank of japan", "الدولار", "الفيدرالي", "اليابان", "الين", "بنك اليابان"],
+        }
+        direct = direct_map.get(asset, direct_map["eurusd"])
+        macro = ["inflation", "cpi", "ppi", "employment", "jobs", "payroll", "gdp", "pmi", "interest rate", "central bank", "تضخم", "وظائف", "فائدة", "بنك مركزي"]
+        d = sum(1 for x in direct if x in text)
+        m = sum(1 for x in macro if x in text)
+        return min(100, 30 + d*15 + m*6) if (d or m) else 20
 
 
     def _compare_news_hypothesis(self, expected: Dict, actual_change: float) -> Dict:
@@ -455,10 +459,10 @@ class TonaEliteEngine:
             "description": self._safe_str(news_item.get("description")),
             "source": self._safe_str(news_item.get("source")),
             "published_at": self._safe_str(news_item.get("published_at")),
-            "oil_change_15m": 0.0, "oil_change_60m": 0.0,
-            "silver_change_15m": 0.0, "silver_change_60m": 0.0,
-            "oil_price_before": 0.0, "oil_price_at_news": 0.0, "oil_price_15min": 0.0, "oil_price_60min": 0.0,
-            "silver_price_before": 0.0, "silver_price_at_news": 0.0, "silver_price_15min": 0.0, "silver_price_60min": 0.0,
+            "eurusd_change_15m": 0.0, "eurusd_change_60m": 0.0,
+            "usdjpy_change_15m": 0.0, "usdjpy_change_60m": 0.0,
+            "eurusd_price_before": 0.0, "eurusd_price_at_news": 0.0, "eurusd_price_15min": 0.0, "eurusd_price_60min": 0.0,
+            "usdjpy_price_before": 0.0, "usdjpy_price_at_news": 0.0, "usdjpy_price_15min": 0.0, "usdjpy_price_60min": 0.0,
             "is_significant": False, "direction": "محايد", "classification": "غير مؤثر",
             "change_pct": 0.0, "asset": asset_hint,
             "news_potential_score": potential["score"], "news_potential": potential["level"],
@@ -481,7 +485,7 @@ class TonaEliteEngine:
             completed_15 = False
             completed_60 = False
             measured_assets = []
-            for asset in ("oil", "silver"):
+            for asset in ("eurusd", "usdjpy"):
                 data = (candles_data or {}).get(asset) or {}
                 closes = data.get("closes") or []
                 # يتطلب القياس أن تكون السلسلة دقيقة واحدة. إذا كان هناك timestamp نستخدمه بدلاً من افتراض الفهرس.
@@ -522,7 +526,7 @@ class TonaEliteEngine:
 
             # نستخدم أكبر حركة مكتملة، لكن لا نسميها "سببية"؛ هي ارتباط زمني مقاس فقط.
             changes = []
-            for asset in ("oil", "silver"):
+            for asset in ("eurusd", "usdjpy"):
                 for window in ("15m", "60m"):
                     v = float(result.get(f"{asset}_change_{window}", 0) or 0)
                     if v != 0:
@@ -647,7 +651,7 @@ class TonaEliteEngine:
     # 🧠 صياغة التقرير (معتمد على الأرقام فقط، بدون جداول أو رموز غريبة)
     # =====================================================================
 
-    def _groq_report(self, analyzed_news: List[Dict], oil_price: float, silver_price: float, fetch_stats: Optional[Dict] = None) -> str:
+    def _groq_report(self, analyzed_news: List[Dict], eurusd_price: float, usdjpy_price: float, fetch_stats: Optional[Dict] = None) -> str:
         """صياغة التقرير عبر Groq مع فصل واضح بين غياب الأخبار وفشل النموذج.
         لا نسمح بقطع التقرير عند نهاية نافذة التوليد؛ وإذا أعاد المزود
         استجابة ناقصة نعيد الطلب بصيغة أقصر ومكتملة.
@@ -656,8 +660,8 @@ class TonaEliteEngine:
         try:
             # الحالة الحالية للسوق مستقلة عن أثر الأخبار، وتظهر صراحة في الحكم النهائي.
             candles_for_state = getattr(self, "_last_candles_data", {}) or {}
-            oil_state = self._current_market_state(candles_for_state, "oil")
-            silver_state = self._current_market_state(candles_for_state, "silver")
+            eurusd_state = self._current_market_state(candles_for_state, "eurusd")
+            usdjpy_state = self._current_market_state(candles_for_state, "usdjpy")
             significant_news = [n for n in analyzed_news if n and n.get("is_significant", False)]
             candidate_news = [n for n in analyzed_news if n]
 
@@ -665,9 +669,9 @@ class TonaEliteEngine:
             news_lines = []
             for news in candidate_news[:8]:
                 title = self._safe_str(news.get("title"))[:140]
-                asset = "النفط" if news.get("asset") == "oil" else "الفضة" if news.get("asset") == "silver" else "النفط/الفضة"
-                c15 = float(news.get("oil_change_15m", 0) or news.get("silver_change_15m", 0) or 0)
-                c60 = float(news.get("oil_change_60m", 0) or news.get("silver_change_60m", 0) or 0)
+                asset = "EUR/USD" if news.get("asset") == "oil" else "USD/JPY" if news.get("asset") == "silver" else "EUR/USD/USD/JPY"
+                c15 = float(news.get("eurusd_change_15m", 0) or news.get("usdjpy_change_15m", 0) or 0)
+                c60 = float(news.get("eurusd_change_60m", 0) or news.get("usdjpy_change_60m", 0) or 0)
                 news_lines.append(f"- {title} | المصدر: {self._safe_str(news.get('source'))} | الأصل: {asset} | 15د={c15:+.3f}% | 60د={c60:+.3f}% | التصنيف={self._safe_str(news.get('classification'))} | أهمية={news.get('news_potential_score',0)} | ارتباط الأصل={news.get('asset_relevance_score',0)} | الاتجاه المتوقع={self._safe_str(news.get('expected_direction'))} | توافق الاتجاه={self._safe_str(news.get('direction_hypothesis_match'))} | الثقة الاستخباراتية={news.get('intelligence_confidence',0)} | القياس={self._safe_str(news.get('measurement_status'))}")
             news_text = "\n".join(news_lines) if news_lines else "لا توجد أخبار اجتازت مرحلة التحليل السعري."
 
@@ -685,15 +689,15 @@ class TonaEliteEngine:
 - الأخبار ذات الفرضية الاتجاهية المتوافقة مع حركة السعر: {sum(1 for n in candidate_news if n.get("direction_hypothesis_match") == "متوافق")}
 - الأخبار ذات الفرضية الاتجاهية المتعارضة مع حركة السعر: {sum(1 for n in candidate_news if n.get("direction_hypothesis_match") == "متعارض")}
 
-الأسعار الحالية: النفط={float(oil_price or 0):.3f}، الفضة={float(silver_price or 0):.3f}
-الاتجاه الحالي الفعلي للنفط: {oil_state["direction"]} {oil_state["strength"]} | 15د={oil_state["change_15m"]:+.3f}% | 60د={oil_state["change_60m"]:+.3f}%
-الاتجاه الحالي الفعلي للفضة: {silver_state["direction"]} {silver_state["strength"]} | 15د={silver_state["change_15m"]:+.3f}% | 60د={silver_state["change_60m"]:+.3f}%
+الأسعار الحالية: EUR/USD={float(eurusd_price or 0):.3f}، USD/JPY={float(usdjpy_price or 0):.3f}
+الاتجاه الحالي الفعلي للنفط: {eurusd_state["direction"]} {eurusd_state["strength"]} | 15د={eurusd_state["change_15m"]:+.3f}% | 60د={eurusd_state["change_60m"]:+.3f}%
+الاتجاه الحالي الفعلي للفضة: {usdjpy_state["direction"]} {usdjpy_state["strength"]} | 15د={usdjpy_state["change_15m"]:+.3f}% | 60د={usdjpy_state["change_60m"]:+.3f}%
 
 الأخبار والقياسات:
 {news_text}
 
 اكتب تقريراً عربياً مهنياً كاملاً، واضحاً ومترابطاً، من 10-16 سطراً تقريباً.
-ابدأ بملخص حالة المصادر والتغطية، ثم حلل أهم الأخبار، ثم قدم حكماً استخباراتياً نهائياً. يجب أن يتضمن الحكم النهائي صراحةً الاتجاه الحالي الفعلي للنفط والفضة (صعود/هبوط/محايد مع قوي/متوسط/ضعيف)، ثم اتجاه الأخبار، ثم مستوى الثقة، ولا تستبدل الاتجاه الحالي بعبارة عامة مثل "السوق ينتظر".
+ابدأ بملخص حالة المصادر والتغطية، ثم حلل أهم الأخبار، ثم قدم حكماً استخباراتياً نهائياً. يجب أن يتضمن الحكم النهائي صراحةً الاتجاه الحالي الفعلي للنفط وUSD/JPY (صعود/هبوط/محايد مع قوي/متوسط/ضعيف)، ثم اتجاه الأخبار، ثم مستوى الثقة، ولا تستبدل الاتجاه الحالي بعبارة عامة مثل "السوق ينتظر".
 لكل خبر مهم، عند توفر البيانات، اذكر باختصار: أهمية الخبر، ارتباطه بالأصل، الاتجاه المتوقع، حركة 15 دقيقة، حركة 60 دقيقة، وتوافق الفرضية مع السوق.
 - افصل دائماً بين أهمية الخبر المحتملة وبين التأثير السعري المقاس.
 - إذا كان الخبر عالي الأهمية أساسياً لكن الحركة السعرية صغيرة أو النافذة غير مكتملة، قل "مهم أساسياً لكن التأثير السعري غير مؤكد" ولا تقل "غير مؤثر" بشكل مطلق.
@@ -711,7 +715,7 @@ class TonaEliteEngine:
             if not self.groq_api_key:
                 self._last_report_status = {"provider": "fallback", "reason": "missing_groq_api_key"}
                 logging.error("❌ Groq غير متاح: GROQ_API_KEY مفقود")
-                return self._fallback_report(analyzed_news, oil_price, silver_price, reason="missing_groq_api_key", fetch_stats=fetch_stats)
+                return self._fallback_report(analyzed_news, eurusd_price, usdjpy_price, reason="missing_groq_api_key", fetch_stats=fetch_stats)
 
             headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
             payload = {
@@ -815,10 +819,10 @@ class TonaEliteEngine:
             logging.debug(traceback.format_exc())
 
         self._last_report_status = {"provider": "fallback", "reason": reason}
-        return self._fallback_report(analyzed_news, oil_price, silver_price, reason=reason, fetch_stats=fetch_stats)
+        return self._fallback_report(analyzed_news, eurusd_price, usdjpy_price, reason=reason, fetch_stats=fetch_stats)
 
 
-    def _fallback_report(self, analyzed_news, oil_price, silver_price, reason="no_significant_news", fetch_stats=None) -> str:
+    def _fallback_report(self, analyzed_news, eurusd_price, usdjpy_price, reason="no_significant_news", fetch_stats=None) -> str:
         """تقرير احتياطي في حال فشل Groq أو عدم وجود أخبار مؤثرة"""
         try:
             lines = []
@@ -828,15 +832,15 @@ class TonaEliteEngine:
             lines.append("━" * 40)
             lines.append("")
 
-            if oil_price:
-                lines.append(f"سعر النفط: {float(oil_price):.2f} دولار")
-            if silver_price:
-                lines.append(f"سعر الفضة: {float(silver_price):.3f} دولار")
+            if eurusd_price:
+                lines.append(f"سعر EUR/USD: {float(eurusd_price):.2f} دولار")
+            if usdjpy_price:
+                lines.append(f"سعر USD/JPY: {float(usdjpy_price):.3f} دولار")
 
-            oil_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "oil")
-            silver_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "silver")
-            lines.append(f"الاتجاه الحالي للنفط: {oil_state['direction']} {oil_state['strength']} | 15د {oil_state['change_15m']:+.3f}% | 60د {oil_state['change_60m']:+.3f}%")
-            lines.append(f"الاتجاه الحالي للفضة: {silver_state['direction']} {silver_state['strength']} | 15د {silver_state['change_15m']:+.3f}% | 60د {silver_state['change_60m']:+.3f}%")
+            eurusd_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "eurusd")
+            usdjpy_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "usdjpy")
+            lines.append(f"الاتجاه الحالي للنفط: {eurusd_state['direction']} {eurusd_state['strength']} | 15د {eurusd_state['change_15m']:+.3f}% | 60د {eurusd_state['change_60m']:+.3f}%")
+            lines.append(f"الاتجاه الحالي للفضة: {usdjpy_state['direction']} {usdjpy_state['strength']} | 15د {usdjpy_state['change_15m']:+.3f}% | 60د {usdjpy_state['change_60m']:+.3f}%")
 
             fetch_stats = fetch_stats or self._last_fetch_stats or {}
             significant = [n for n in analyzed_news if n and n.get("is_significant", False)] if analyzed_news else []
@@ -848,8 +852,8 @@ class TonaEliteEngine:
                     if not news:
                         continue
                     title = self._safe_str(news.get("title"))
-                    change_60m = news.get("oil_change_60m", 0) or news.get("silver_change_60m", 0) or 0
-                    change_15m = news.get("oil_change_15m", 0) or news.get("silver_change_15m", 0) or 0
+                    change_60m = news.get("eurusd_change_60m", 0) or news.get("usdjpy_change_60m", 0) or 0
+                    change_15m = news.get("eurusd_change_15m", 0) or news.get("usdjpy_change_15m", 0) or 0
                     direction = "ارتفاع" if change_60m > 0 else "هبوط" if change_60m < 0 else "استقرار"
                     classification = news.get("classification", "غير مؤثر")
                     lines.append(f"• {title[:60]}...")
@@ -994,9 +998,7 @@ class TonaEliteEngine:
         feeds = [
             "https://feeds.reuters.com/reuters/commoditiesNews",
             "https://feeds.bbci.co.uk/news/business/rss.xml",
-            "https://oilprice.com/rss/energy-news",
-            "https://oilprice.com/rss/geopolitics",
-            "https://www.aljazeera.com/xml/rss/all.xml",
+                                    "https://www.aljazeera.com/xml/rss/all.xml",
             "https://feeds.skynews.com/feeds/rss/world.xml",
             "https://www.aljazeera.net/feeds/rss",
             "https://www.alarabiya.net/feed/rss",
@@ -1101,7 +1103,7 @@ class TonaEliteEngine:
 
     def format_breaking_alert(self, alert: Dict, open_trades: Dict = None) -> str:
         """صياغة قصيرة ومختلفة جذريًا عن التقرير الاستخباراتي اليدوي."""
-        asset_label = "النفط" if alert.get("asset") == "oil" else "الفضة"
+        asset_label = "EUR/USD" if alert.get("asset") == "oil" else "USD/JPY"
         direction = "ارتفاع" if alert.get("change_pct", 0) > 0 else "هبوط"
         p0 = alert.get("price_before", 0)
         p1 = alert.get("price_current", 0)
@@ -1228,15 +1230,19 @@ class TonaEliteEngine:
 
             candles_data = {}
             try:
-                from main import get_mexc_candles
-                oil_data = get_mexc_candles("USOIL_USDT", "Min1", 420)
-                silver_data = get_mexc_candles("SILVER_USDT", "Min1", 420)
-                if oil_data and oil_data.get("closes"): candles_data["oil"] = oil_data
-                if silver_data and silver_data.get("closes"): candles_data["silver"] = silver_data
+                fetcher = self.candle_fetcher
+                if fetcher:
+                    eurusd_data = fetcher("eurusd", "Min1", 420)
+                    usdjpy_data = fetcher("usdjpy", "Min1", 420)
+                    if eurusd_data and eurusd_data.get("closes"): candles_data["eurusd"] = eurusd_data
+                    if usdjpy_data and usdjpy_data.get("closes"): candles_data["usdjpy"] = usdjpy_data
                 self._last_candles_data = candles_data
-                logging.info(f"📊 Tona: تم تحميل الشموع | oil={bool(candles_data.get('oil'))} silver={bool(candles_data.get('silver'))}")
+                logging.info(
+                    "📊 Tona: تم تحميل شموع Forex | EURUSD=%s USDJPY=%s",
+                    bool(candles_data.get("eurusd")), bool(candles_data.get("usdjpy"))
+                )
             except Exception as e:
-                logging.warning(f"⚠️ Tona: فشل تحميل الشموع: {e}")
+                logging.warning(f"⚠️ Tona: فشل تحميل شموع Forex: {e}")
 
             analyzed = []
             now_utc = datetime.now(timezone.utc)
@@ -1272,12 +1278,12 @@ class TonaEliteEngine:
             self._last_fetch_stats["skipped_bad_time"] = skipped_bad_time
             logging.info(f"🧠 Tona analysis: input={len(news_list)} analyzed={len(analyzed)} significant={sum(1 for n in analyzed if n.get('is_significant'))} old={skipped_old} future={skipped_future}")
 
-            oil_price = 0; silver_price = 0
-            if candles_data.get("oil", {}).get("closes"): oil_price = candles_data["oil"]["closes"][-1]
-            if candles_data.get("silver", {}).get("closes"): silver_price = candles_data["silver"]["closes"][-1]
+            eurusd_price = 0; usdjpy_price = 0
+            if candles_data.get("oil", {}).get("closes"): eurusd_price = candles_data["oil"]["closes"][-1]
+            if candles_data.get("silver", {}).get("closes"): usdjpy_price = candles_data["silver"]["closes"][-1]
 
             # حتى عند عدم وجود خبر مؤثر، نرسل الحالة إلى النموذج بدلاً من إخفائها خلف fallback.
-            return self._groq_report(analyzed, oil_price, silver_price, fetch_stats=self._last_fetch_stats)
+            return self._groq_report(analyzed, eurusd_price, usdjpy_price, fetch_stats=self._last_fetch_stats)
 
         except Exception as e:
             logging.error(f"❌ فشل توليد التقرير الاستخباراتي: {e}")

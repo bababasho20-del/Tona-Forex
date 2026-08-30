@@ -16,7 +16,7 @@ if 'calculate_supertrend_vpt_correct' not in main: errors.append('SuperTrend/VPT
 if 'SIGNAL_CHECK_INTERVAL = 60' not in main: warnings.append('SIGNAL_CHECK_INTERVAL declaration not found verbatim')
 if 'MONITORING_INTERVAL = 300' not in main: warnings.append('MONITORING_INTERVAL declaration not found verbatim')
 if not cfg.get('strategies',{}): errors.append('strategies config missing')
-for asset in ('oil','silver'):
+for asset in ('eurusd','usdjpy'):
     if asset not in cfg.get('strategies',{}): errors.append(f'{asset} strategy missing')
     elif cfg['strategies'][asset].get('timeframes') != ['Min5','Min15','Min60','Hour4']: warnings.append(f'{asset}: unexpected analysis timeframe list')
 print('TONA OFFLINE INTEGRITY AUDIT')

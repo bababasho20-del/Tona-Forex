@@ -1,11 +1,11 @@
 {
   "strategies": {
-    "oil": {
-      "st_multiplier": 1.5,
-      "st_period": 100,
+    "eurusd": {
+      "st_multiplier": 2.2,
+      "st_period": 50,
       "vpt_len": 10,
       "vpt_ema_length": 14,
-      "base_timeframe": "Min15",
+      "base_timeframe": "Min5",
       "use_rsi_filter": false,
       "use_macd_filter": false,
       "use_adx_filter": false,
@@ -32,14 +32,14 @@
         "Hour4"
       ]
     },
-    "silver": {
-      "st_multiplier": 2.2,
-      "st_period": 100,
+    "usdjpy": {
+      "st_multiplier": 2.5,
+      "st_period": 60,
       "vpt_len": 10,
       "vpt_ema_length": 10,
-      "base_timeframe": "Min15",
-      "use_rsi_filter": true,
-      "use_macd_filter": true,
+      "base_timeframe": "Min5",
+      "use_rsi_filter": false,
+      "use_macd_filter": false,
       "use_adx_filter": false,
       "rsi_period": 7,
       "rsi_min": 35,
@@ -68,6 +68,6 @@
   "system": {
     "bot_name": "تولين",
     "developer": "بسام الحوباني",
-    "version": "V14.0-REBUILT"
+    "version": "V14.2-FOREX-CORRECTED"
   }
 }

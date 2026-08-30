@@ -1,55 +1,18 @@
-# Forex Advisor Bot — EUR/USD وUSD/JPY
+# Tona Forex — EUR/USD وUSD/JPY
 
-هذه حزمة مستقلة مبنية من المشروع السابق. تم استبدال الطبقات الأساسية التالية بنسخ Forex جديدة:
+نسخة Forex مستقلة للمحاكاة والتعلم، وتدعم زوجي EUR/USD وUSD/JPY فقط.
 
-- `main.py`
-- `risk_master.py`
-- `market_analyzer.py`
-- `advanced_indicators.py`
-- `learning_db.py`
-- `pattern_discovery.py`
+- Scanner: Min5 كل 60 ثانية.
+- HealthCheck: كل 300 ثانية.
+- Monitoring: كل 300 ثانية.
+- التحليل الشامل: 5m / 15m / 1h / 4h.
+- Data provider: Twelve Data أولاً.
+- Yahoo fallback غير مفعّل افتراضياً.
+- لا يوجد تنفيذ صفقات حقيقية.
 
-تدعم النسخة الزوجين `EUR/USD` و`USD/JPY` فقط، وتعمل حاليًا في نطاق التحليل والمحاكاة. لا تحتوي الحزمة على تنفيذ صفقات حقيقية.
+## إعدادات SuperTrend/VPT
+- EUR/USD: period 50 / multiplier 2.2 / VPT 10.
+- USD/JPY: period 60 / multiplier 2.5 / VPT 10.
+- Base timeframe: Min5.
 
-## الاختبارات
-
-```bash
-python3 -m py_compile main.py risk_master.py market_analyzer.py advanced_indicators.py learning_db.py pattern_discovery.py
-python3 test_risk_master.py
-python3 test_market_analyzer.py
-python3 test_advanced_indicators.py
-python3 test_learning_db.py
-python3 test_pattern_discovery.py
-```
-
-## الحالة الحالية
-
-الملفات الخارجية الأخرى مرفقة من الأرشيف الأصلي ولم تُحوّل كلها بعد. يجب تعديلها أو استبدالها قبل اعتبار البوت متوافقًا بالكامل مع Forex، خصوصًا:
-
-```text
-adaptive_learning_engine.py
-pattern_analyzer.py
-predictor.py
-decision_matrix.py
-db_manager.py
-supabase_bridge.py
-memory.py
-context_memory.py
-context_builder.py
-learner.py
-learning_system.py
-```
-
-كما أن ملفات المحادثة والمحركات الذكية تحتوي في النسخ الأصلية على افتراضات ورسائل قديمة، وستأتي بعد تثبيت طبقات البيانات والمخاطر والتحليل والتعلم.
-
-## البيانات والذاكرة
-
-لا تنقل قواعد البيانات أو ملفات الصفقات القديمة إلى هذه الحزمة. يجب استخدام قاعدة Forex جديدة، وتخزين كل سجل مع `instrument` و`symbol` و`session` و`provider` و`spread_pips` و`profit_after_cost`.
-
-## الأسرار
-
-ضع القيم الفعلية في متغيرات بيئة منصة التشغيل، ولا تضعها داخل Git. استخدم `.env.example` كمرجع للأسماء فقط.
-
-## تحذير التشغيل
-
-هذه الحزمة ليست جاهزة للتداول الحقيقي. يجب أولًا تعديل المحركات المتبقية، توحيد مزود البيانات، إضافة الأخبار والجلسات والتكاليف، ثم إجراء اختبارات تكامل وPaper Trading قبل أي قرار آخر.
+ضع `TWELVE_DATA_API_KEY` في Environment Variables في منصة التشغيل.
