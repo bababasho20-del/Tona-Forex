@@ -3469,30 +3469,121 @@ def get_learning_data_source() -> str:
 # ====================================================================================
 
 # ====================================================================================
-# Forex data provider: Twelve Data only (research/simulation; no order execution)
+# Forex data provider: BingX TradFi primary + optional Twelve Data fallback
 # ====================================================================================
+# IMPORTANT:
+# - SuperTrend/VPT scanner strategy is untouched.
+# - BingX is the primary source for EUR/USD and USD/JPY candles.
+# - Twelve Data is NOT queried by default. Enable it explicitly with
+#   FOREX_ALLOW_TWELVE_FALLBACK=true if a fallback is required.
+# - Market-data caching prevents duplicate requests during the same analysis cycle.
+BINGX_FOREX_CACHE = {}
+BINGX_FOREX_CACHE_LOCK = threading.RLock()
+BINGX_FOREX_CACHE_TTL = int(os.getenv("BINGX_FOREX_CACHE_TTL", "45"))
+BINGX_FOREX_BASE_URL = "https://open-api.bingx.com"
+BINGX_FOREX_KLINES_PATH = "/openApi/swap/v3/quote/klines"
+
+# Twelve Data remains an explicit emergency fallback only; it is disabled by default.
 TWELVE_DATA_CACHE = {}
 TWELVE_DATA_CACHE_LOCK = threading.RLock()
 TWELVE_DATA_RATE_LOCK = threading.Lock()
 TWELVE_DATA_LAST_REQUEST = 0.0
-TWELVE_DATA_MIN_INTERVAL = float(os.getenv("TWELVE_DATA_MIN_INTERVAL", "3.0"))
-TWELVE_DATA_CACHE_TTL = int(os.getenv("TWELVE_DATA_CACHE_TTL", "45"))
+TWELVE_DATA_MIN_INTERVAL = float(os.getenv("TWELVE_DATA_MIN_INTERVAL", "8.0"))
+TWELVE_DATA_CACHE_TTL = int(os.getenv("TWELVE_DATA_CACHE_TTL", "120"))
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
+FOREX_ALLOW_TWELVE_FALLBACK = os.getenv("FOREX_ALLOW_TWELVE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_forex_symbol(symbol):
-    normalized = str(symbol or "").upper().replace("/", "").replace("_", "")
-    mapping = {"EURUSD": "EUR/USD", "USDJPY": "USD/JPY"}
+    normalized = str(symbol or "").upper().replace("/", "").replace("_", "").replace("-", "")
+    mapping = {
+        "EURUSD": ("EUR/USD", "EUR-USD"),
+        "USDJPY": ("USD/JPY", "USD-JPY"),
+    }
     if normalized not in mapping:
         raise ValueError(f"Unsupported Forex instrument: {symbol}")
-    return normalized, mapping[normalized]
+    return normalized, mapping[normalized][0], mapping[normalized][1]
 
 
-def _twelve_interval(interval):
+def _interval_seconds(interval):
     return {
-        "Min1": "1min", "Min5": "5min", "Min15": "15min",
-        "Hour1": "1h", "Hour4": "4h", "Day1": "1day",
-    }.get(str(interval), "15min")
+        "Min1": 60, "Min5": 300, "Min15": 900,
+        "Hour1": 3600, "Hour4": 14400, "Day1": 86400,
+    }.get(str(interval), 900)
+
+
+def _bingx_interval(interval):
+    return {
+        "Min1": "1m", "Min5": "5m", "Min15": "15m",
+        "Hour1": "1h", "Hour4": "4h", "Day1": "1d",
+    }.get(str(interval), "15m")
+
+
+def _parse_bingx_klines(payload, normalized, interval, limit):
+    if not isinstance(payload, dict):
+        return None, "invalid_json"
+    code = payload.get("code")
+    if code not in (None, 0, "0"):
+        return None, str(payload.get("msg") or payload.get("message") or f"code={code}")
+    rows_raw = payload.get("data") or payload.get("rows") or []
+    if isinstance(rows_raw, dict):
+        rows_raw = rows_raw.get("data") or rows_raw.get("rows") or []
+    if not isinstance(rows_raw, list):
+        return None, "invalid_data"
+
+    rows = []
+    interval_sec = _interval_seconds(interval)
+    now_ms = int(time.time() * 1000)
+    for item in rows_raw:
+        try:
+            if isinstance(item, dict):
+                ts = int(float(item.get("time") or item.get("openTime") or item.get("timestamp")))
+                op = float(item.get("open")); hi = float(item.get("high"))
+                lo = float(item.get("low")); cl = float(item.get("close"))
+                vol = float(item.get("volume") or 0.0)
+                close_ts = item.get("closeTime")
+                close_ts = int(float(close_ts)) if close_ts is not None else ts + interval_sec * 1000
+            elif isinstance(item, (list, tuple)) and len(item) >= 6:
+                ts = int(float(item[0])); op = float(item[1]); hi = float(item[2])
+                lo = float(item[3]); cl = float(item[4]); vol = float(item[5] or 0.0)
+                close_ts = int(float(item[6])) if len(item) > 6 and item[6] not in (None, "") else ts + interval_sec * 1000
+            else:
+                continue
+
+            # BingX timestamps are milliseconds; tolerate seconds defensively.
+            if ts < 10_000_000_000:
+                ts *= 1000
+            if close_ts < 10_000_000_000:
+                close_ts *= 1000
+            if close_ts > now_ms:
+                continue  # never feed the currently forming candle to SuperTrend
+            if not all(math.isfinite(x) for x in (op, hi, lo, cl, vol)):
+                continue
+            if hi < max(op, cl) or lo > min(op, cl) or hi < lo:
+                continue
+            rows.append((ts // 1000, op, hi, lo, cl, vol))
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    rows.sort(key=lambda row: row[0])
+    if limit:
+        rows = rows[-int(limit):]
+    if len(rows) < 5:
+        return None, f"insufficient_data:{len(rows)}"
+
+    return {
+        "timestamps": [r[0] for r in rows],
+        "opens": [r[1] for r in rows],
+        "highs": [r[2] for r in rows],
+        "lows": [r[3] for r in rows],
+        "closes": [r[4] for r in rows],
+        "volumes": [r[5] for r in rows],
+        "source": "BingX TradFi",
+        "source_symbol": normalized,
+        "is_research_data": True,
+        "data_quality": "research",
+        "provider_status": "ok",
+    }, "ok"
 
 
 def _wait_for_twelve_data_slot():
@@ -3509,8 +3600,7 @@ def _parse_twelve_data_payload(payload, symbol, interval, limit):
     if not isinstance(payload, dict):
         return None
     if payload.get("status") == "error" or payload.get("code"):
-        message = payload.get("message", "unknown Twelve Data error")
-        raise RuntimeError(str(message))
+        raise RuntimeError(str(payload.get("message", "unknown Twelve Data error")))
     values = payload.get("values") or []
     if not isinstance(values, list):
         return None
@@ -3525,10 +3615,7 @@ def _parse_twelve_data_payload(payload, symbol, interval, limit):
                 timestamp = int(dt.timestamp())
             else:
                 timestamp = int(float(timestamp))
-            op = float(item["open"])
-            hi = float(item["high"])
-            lo = float(item["low"])
-            cl = float(item["close"])
+            op = float(item["open"]); hi = float(item["high"]); lo = float(item["low"]); cl = float(item["close"])
             vol = float(item.get("volume") or item.get("tick_volume") or 0.0)
             if not all(math.isfinite(x) for x in (op, hi, lo, cl, vol)):
                 continue
@@ -3544,32 +3631,19 @@ def _parse_twelve_data_payload(payload, symbol, interval, limit):
     if len(rows) < 5:
         return None
     return {
-        "timestamps": [row[0] for row in rows],
-        "opens": [row[1] for row in rows],
-        "highs": [row[2] for row in rows],
-        "lows": [row[3] for row in rows],
-        "closes": [row[4] for row in rows],
-        "volumes": [row[5] for row in rows],
-        "source": "Twelve Data",
-        "source_symbol": symbol,
-        "is_research_data": True,
-        "data_quality": "research",
-        "provider_status": "ok",
+        "timestamps": [r[0] for r in rows], "opens": [r[1] for r in rows],
+        "highs": [r[2] for r in rows], "lows": [r[3] for r in rows],
+        "closes": [r[4] for r in rows], "volumes": [r[5] for r in rows],
+        "source": "Twelve Data", "source_symbol": symbol,
+        "is_research_data": True, "data_quality": "research", "provider_status": "ok",
     }
 
 
-def _interval_seconds(interval):
-    return {"Min1": 60, "Min5": 300, "Min15": 900, "Hour1": 3600, "Hour4": 14400, "Day1": 86400}.get(str(interval), 900)
-
-
-def get_forex_candles(symbol, interval="Min15", limit=1000):
-    """Fetch research candles from Twelve Data with shared throttling and cache."""
-    normalized, api_symbol = _normalize_forex_symbol(symbol)
-    interval = str(interval)
-    limit = max(5, min(int(limit), 5000))
+def _get_forex_from_twelve_data(normalized, api_symbol, interval, limit):
+    if not FOREX_ALLOW_TWELVE_FALLBACK:
+        return None
     api_key = os.getenv("TWELVE_DATA_API_KEY", "").strip()
     if not api_key:
-        logger.error("[ForexData] TWELVE_DATA_API_KEY is missing")
         return None
     cache_key = (normalized, interval, limit)
     now = time.monotonic()
@@ -3578,51 +3652,88 @@ def get_forex_candles(symbol, interval="Min15", limit=1000):
         if cached and now - cached["stored_at"] < TWELVE_DATA_CACHE_TTL:
             return cached["data"]
     params = {
-        "symbol": api_symbol,
-        "interval": _twelve_interval(interval),
-        "outputsize": limit,
-        "apikey": api_key,
-        "timezone": "UTC",
-        "format": "JSON",
+        "symbol": api_symbol, "interval": {"Min1":"1min","Min5":"5min","Min15":"15min","Hour1":"1h","Hour4":"4h","Day1":"1day"}.get(interval, "15min"),
+        "outputsize": limit, "apikey": api_key, "timezone": "UTC", "format": "JSON",
     }
-    last_error = "unknown_error"
-    for attempt in range(3):
-        try:
-            _wait_for_twelve_data_slot()
-            response = requests.get(
-                TWELVE_DATA_BASE_URL,
-                params=params,
-                headers={"Accept": "application/json", "User-Agent": "ForexAdvisorResearch/1.0"},
-                timeout=20,
-            )
-            if response.status_code == 429:
-                last_error = "rate_limited"
-                time.sleep(min(60, 5 * (2 ** attempt)))
-                continue
-            response.raise_for_status()
-            data = _parse_twelve_data_payload(response.json(), normalized, interval, limit)
-            if data is None:
-                last_error = "empty_or_insufficient_data"
-                break
+    try:
+        _wait_for_twelve_data_slot()
+        response = requests.get(TWELVE_DATA_BASE_URL, params=params,
+                                headers={"Accept":"application/json","User-Agent":"TonaPrometheus-Forex/15"}, timeout=15)
+        if response.status_code == 429:
+            logger.warning(f"[ForexData] Twelve Data fallback rate-limited: {api_symbol}/{interval}")
+            return None
+        response.raise_for_status()
+        data = _parse_twelve_data_payload(response.json(), normalized, interval, limit)
+        if data:
             with TWELVE_DATA_CACHE_LOCK:
                 TWELVE_DATA_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
+        return data
+    except Exception as exc:
+        logger.warning(f"[ForexData] Twelve Data fallback failed: {api_symbol}/{interval} reason={exc}")
+        return None
+
+
+def get_forex_candles(symbol, interval="Min15", limit=1000):
+    """Fetch closed Forex candles from BingX TradFi.
+
+    BingX is the primary provider for EUR/USD and USD/JPY. This function is
+    read-only and is used by the existing scanner/analysis layers; it does not
+    alter SuperTrend/VPT or its 60-second schedule.
+    """
+    normalized, api_symbol, bingx_symbol = _normalize_forex_symbol(symbol)
+    interval = str(interval)
+    limit = max(5, min(int(limit), 1000))
+    cache_key = (normalized, interval, limit)
+    now = time.monotonic()
+
+    with BINGX_FOREX_CACHE_LOCK:
+        cached = BINGX_FOREX_CACHE.get(cache_key)
+        if cached and now - cached["stored_at"] < BINGX_FOREX_CACHE_TTL:
+            return cached["data"]
+
+    params = {"symbol": bingx_symbol, "interval": _bingx_interval(interval), "limit": limit}
+    try:
+        response = requests.get(
+            BINGX_FOREX_BASE_URL + BINGX_FOREX_KLINES_PATH,
+            params=params,
+            headers={"Accept":"application/json", "User-Agent":"TonaPrometheus-Forex/15"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        data, reason = _parse_bingx_klines(response.json(), normalized, interval, limit)
+        if data:
+            with BINGX_FOREX_CACHE_LOCK:
+                BINGX_FOREX_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
+            logger.debug(f"[ForexData] BingX OK: {bingx_symbol}/{_bingx_interval(interval)} candles={len(data['closes'])}")
             return data
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt < 2:
-                time.sleep(min(30, 3 * (2 ** attempt)))
-    logger.warning(f"[ForexData] Twelve Data failed: {api_symbol}/{interval} reason={last_error}")
+        logger.warning(f"[ForexData] BingX failed: {bingx_symbol}/{_bingx_interval(interval)} reason={reason}")
+    except Exception as exc:
+        logger.warning(f"[ForexData] BingX request failed: {bingx_symbol}/{_bingx_interval(interval)} reason={exc}")
+
+    # Explicit opt-in only: do not automatically hammer Twelve Data after a BingX failure.
+    fallback = _get_forex_from_twelve_data(normalized, api_symbol, interval, limit)
+    if fallback:
+        logger.info(f"[ForexData] Using explicit Twelve Data fallback: {api_symbol}/{interval}")
+        return fallback
     return None
 
+
 def fetch_multiple_timeframes(symbol, timeframes):
+    """Fetch requested timeframes concurrently from the primary Forex provider."""
     results = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(get_forex_candles, symbol, tf["interval"], tf["limit"]): name for name, tf in timeframes.items()}
+    if not timeframes:
+        return results
+    with ThreadPoolExecutor(max_workers=min(4, len(timeframes))) as executor:
+        futures = {
+            executor.submit(get_forex_candles, symbol, tf["interval"], tf["limit"]): name
+            for name, tf in timeframes.items()
+        }
         for future in as_completed(futures):
             name = futures[future]
             try:
                 results[name] = future.result()
-            except:
+            except Exception as exc:
+                logger.warning(f"[ForexData] فشل جلب {symbol}/{name}: {exc}")
                 results[name] = None
     return results
 
@@ -8088,9 +8199,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     config = load_config()
     strategy_config = config["strategies"][asset_type]
 
-    # Scanner is hard-locked to the strategy trading timeframe: Min5.
-    # Configuration cannot accidentally make the 60s scanner request another timeframe.
-    base_timeframe = "Min5"
+    base_timeframe = strategy_config.get("base_timeframe", "Min5")
     st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
     st_period = strategy_config.get("st_period", 100)
     vpt_len = strategy_config.get("vpt_len", 10)
@@ -14229,125 +14338,19 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # ============================================================================
-# الخيط 1: ماسح الإشارات — المصدر الوحيد للفحص الدوري كل 60 ثانية
+# الخيط 1: ماسح الإشارات (بدون تغيير)
 # ============================================================================
 
-def _scanner_check_supertrend_vpt(asset_type):
-    """
-    فحص الاستراتيجية فقط. لا يقوم بتحليل شامل ولا يستدعي أي فريم آخر.
-    نفس منطق SuperTrend/VPT الموجود في analyze_and_send، مع Min5 وشمعة
-    التأكيد المحددة في الإعدادات. هذه الدالة هي البوابة الوحيدة للفحص الدوري.
-    """
-    config = load_config()
-    strategy_config = config["strategies"][asset_type]
-    base_timeframe = "Min5"
-    st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
-    st_period = strategy_config.get("st_period", 100)
-    vpt_len = strategy_config.get("vpt_len", 10)
-    confirmation_bars = strategy_config.get("confirmation_bars", 1)
-
-    symbol = get_instrument_spec(asset_type)["symbol"]
-    logger.info(
-        f"📊 [Scanner] استخدام الفريم الزمني {base_timeframe} لـ {asset_type} "
-        f"مع {confirmation_bars} شمعة تأكيد"
-    )
-
-    # IMPORTANT: this is the ONLY periodic market-data request in the 60s loop.
-    data = get_forex_candles(symbol, interval=base_timeframe, limit=200)
-    if not data or not data.get("closes") or len(data["closes"]) < 10:
-        logger.warning(f"⚠️ [Scanner] بيانات {asset_type} غير كافية للفحص")
-        return None
-
-    closes = data["closes"]
-    st_result = calculate_supertrend_vpt_correct(
-        data, st_mult=st_multiplier, st_period=st_period, vpt_len=vpt_len
-    )
-    if st_result is None or len(st_result) != 3:
-        logger.error(f"❌ [Scanner] فشل حساب VPT/SuperTrend لـ {asset_type}")
-        return None
-
-    st_line_arr, trend, vpt_ema = st_result
-    if len(vpt_ema) < 3 or len(st_line_arr) < 3 or len(trend) < 3:
-        logger.warning(f"⚠️ [Scanner] بيانات VPT/SuperTrend غير كافية لـ {asset_type}")
-        return None
-
-    previous_close = closes[-2]
-    current_close = closes[-1]
-    previous_st = st_line_arr[-2]
-    current_st = st_line_arr[-1]
-
-    # Preserve the original SuperTrend crossover/crossunder logic exactly.
-    crossover = previous_close <= previous_st and current_close > current_st
-    crossunder = previous_close >= previous_st and current_close < current_st
-
-    confirmation_ok = False
-    if crossover or crossunder:
-        confirmation_ok = True
-        if confirmation_bars > 0:
-            current_trend = trend[-1]
-            for i in range(1, confirmation_bars + 1):
-                if len(trend) > i and trend[-i] != current_trend:
-                    confirmation_ok = False
-                    logger.info(
-                        f"⏳ [Scanner] فشل التأكيد {asset_type}: "
-                        f"trend[-{i}]={trend[-i]} != {current_trend}"
-                    )
-                    break
-
-    signal = "BUY" if crossover and confirmation_ok else "SELL" if crossunder and confirmation_ok else "WAIT"
-    timestamps = data.get("timestamps", [])
-    candle_ts = timestamps[-1] if timestamps else None
-
-    logger.info(
-        f"🔍 [Scanner] {asset_type} {base_timeframe}: close={current_close:.5f}, "
-        f"ST={current_st:.5f}, crossover={crossover}, crossunder={crossunder}, "
-        f"confirmation={confirmation_ok}, signal={signal}"
-    )
-
-    if signal not in ("BUY", "SELL") or candle_ts is None:
-        return None
-
-    return {
-        "signal": signal,
-        "timestamp": candle_ts,
-        "key": f"{base_timeframe}|{candle_ts}|{signal}",
-    }
-
-
 def signal_scanner():
-    """
-    الماسح الدوري الوحيد كل 60 ثانية.
-    دورة WAIT تفحص SuperTrend/VPT على Min5 فقط. التحليل الشامل لا يبدأ
-    إلا بعد ظهور إشارة مؤكدة جديدة. لا يتم استدعاء analyze_and_send في كل دورة.
-    """
-    logger.info(
-        "🚀 [Scanner] بدأ التشغيل — المصدر الوحيد لفحص السوق كل 60 ثانية | "
-        "SuperTrend/VPT فقط"
-    )
+    """ماسح الإشارات - يعمل كل 60 ثانية"""
+    logger.info("[Scanner] بدأ التشغيل")
     while True:
         start = time.time()
         for asset_type in ["eurusd", "usdjpy"]:
             try:
-                result = _scanner_check_supertrend_vpt(asset_type)
-                if not result:
-                    continue
-
-                key = result["key"]
-                with SIGNAL_DEDUPE_LOCK:
-                    if LAST_PROCESSED_SIGNAL_CANDLE.get(asset_type) == key:
-                        logger.info(f"♻️ [Scanner] تجاهل إشارة مكررة: {asset_type} {key}")
-                        continue
-
-                # Only a NEW confirmed signal may enter full analysis.
-                logger.info(
-                    f"🚨 [Scanner] {asset_type}: إشارة {result['signal']} مؤكدة — "
-                    "بدء التحليل الشامل الآن فقط"
-                )
                 analyze_and_send(asset_type, is_manual=False)
-
             except Exception as e:
-                logger.error(f"[Scanner] خطأ في فحص {asset_type}: {e}", exc_info=True)
-
+                logger.error(f"[Scanner] خطأ في فحص {asset_type}: {e}")
         elapsed = time.time() - start
         time.sleep(max(0, SIGNAL_CHECK_INTERVAL - elapsed))
 
