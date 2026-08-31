@@ -174,6 +174,8 @@ class AdaptiveLearningEngine:
                 if asset_type:
                     trades = self.learning_db.get_trades_by_asset(asset_type, limit)
                 else:
+                    # Forex-only project: with no asset specified, aggregate only supported
+                    # Forex instruments. Legacy oil/silver history is intentionally ignored.
                     trades = []
                     for asset in ("eurusd", "usdjpy"):
                         trades.extend(self.learning_db.get_trades_by_asset(asset, limit))
@@ -507,6 +509,12 @@ class AdaptiveLearningEngine:
         confidence = 50 + 45 * separation * (0.25 + 0.50 * evidence_factor + 0.25 * similarity_factor)
         confidence *= (1 - 0.35 * false_score / 100)
         confidence = int(round(max(25, min(95, confidence))))
+        if not history:
+            # A cold-start model has no empirical Forex evidence. Do not expose
+            # the neutral Bayesian prior as learned confidence.
+            probability = 0.50
+            confidence = 0
+            false_score = 0
 
         # Conservative verdict: require both probability and evidence.
         if probability >= 0.60 and confidence >= 55:
@@ -540,6 +548,8 @@ class AdaptiveLearningEngine:
             "learned_weights": {k: round(v, 4) for k, v in learned_weights.items()},
             "learned_pattern": pattern,
             "asset_direction_sample": int(scoped_n),
+            "historical_count": int(len(history)),
+            "has_historical_data": bool(history),
             "false_signal_score": false_score,
             "false_signal_reasons": false_reasons,
             "red_flags": risk_flags,

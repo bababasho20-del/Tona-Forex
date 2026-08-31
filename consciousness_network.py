@@ -1145,8 +1145,8 @@ class ConsciousnessNetwork:
         self.consciousness.dominant_emotion = max(emotions, key=emotions.get) if emotions else "neutral"
         
         if real_market_data:
-            oil = real_market_data.get('oil', {})
-            silver = real_market_data.get('silver', {})
+            oil = real_market_data.get('eurusd', {})
+            silver = real_market_data.get('usdjpy', {})
             avg_score = (oil.get('score', 50) + silver.get('score', 50)) / 2
             
             if avg_score >= 65:
@@ -1170,8 +1170,8 @@ class ConsciousnessNetwork:
     
     def _build_real_narrative(self, market_data: Dict) -> str:
         parts = []
-        oil = market_data.get('oil', {})
-        silver = market_data.get('silver', {})
+        oil = market_data.get('eurusd', {})
+        silver = market_data.get('usdjpy', {})
         
         oil_price = oil.get('price', 0)
         silver_price = silver.get('price', 0)
@@ -1215,8 +1215,8 @@ class ConsciousnessNetwork:
         return " | ".join(parts) if parts else "لا توجد بيانات كافية"
     
     def _decide_real_action(self, market_data: Dict) -> str:
-        oil = market_data.get('oil', {})
-        silver = market_data.get('silver', {})
+        oil = market_data.get('eurusd', {})
+        silver = market_data.get('usdjpy', {})
         oil_signal = oil.get('signal', 'WAIT')
         silver_signal = silver.get('signal', 'WAIT')
         avg_score = (oil.get('score', 50) + silver.get('score', 50)) / 2
@@ -1770,7 +1770,7 @@ class ConsciousnessNetwork:
         if open_trades:
             lines.append(f"**أركز على {len(open_trades)} صفقة مفتوحة:**")
             for asset, trade in open_trades.items():
-                label = "💶 EUR/USD" if asset == "eurusd" else "💴 USD/JPY"
+                label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
                 profit = trade.get('profit_dollars', 0)
                 p_str = f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}" if profit < 0 else "$0.00"
                 lines.append(f"   • {label}: {p_str}")
@@ -1843,7 +1843,7 @@ class ConsciousnessNetwork:
         # محاولة استخدام التحليل الشامل من main
         if self.main and hasattr(self.main, 'format_concise_analysis'):
             try:
-                result = self.main.perform_comprehensive_analysis("oil", False, None)
+                result = self.main.perform_comprehensive_analysis("eurusd", False, None)
                 if result and isinstance(result, tuple) and len(result) >= 2:
                     analysis = result[0]
                     if analysis:
@@ -1862,7 +1862,7 @@ class ConsciousnessNetwork:
         """🥈 تحليل الفضة - يستخدم التحليل الشامل"""
         if self.main and hasattr(self.main, 'format_concise_analysis'):
             try:
-                result = self.main.perform_comprehensive_analysis("silver", False, None)
+                result = self.main.perform_comprehensive_analysis("usdjpy", False, None)
                 if result and isinstance(result, tuple) and len(result) >= 2:
                     analysis = result[0]
                     if analysis:
@@ -1893,7 +1893,7 @@ class ConsciousnessNetwork:
                 trade_type = open_trade.get('type', 'BUY')
                 profit = open_trade.get('profit_dollars', 0)
                 price = engine_data.get(f'{asset}_price', 0)
-                label = "💶 EUR/USD" if asset == "eurusd" else "💴 USD/JPY"
+                label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
                 
                 status = "✅ ربح" if profit > 0 else "❌ خسارة" if profit < 0 else "⚪ تعادل"
                 lines.append(f"**{label}:** {trade_type} | {status} (${profit:+.2f}) | السعر: ${price:.2f}")
@@ -1921,7 +1921,7 @@ class ConsciousnessNetwork:
                         total_profit += stats.get('total_profit', 0)
                         total_trades += stats.get('total_trades', 0)
                         winning_trades += stats.get('winning_trades', 0)
-                        label = "💶 EUR/USD" if asset == "eurusd" else "💴 USD/JPY"
+                        label = "🛢️ النفط" if asset == "oil" else "🥈 الفضة"
                         lines.append(f"**{label}:** {stats.get('total_trades', 0)} صفقة | ربح: ${stats.get('total_profit', 0):.2f} | نجاح: {stats.get('win_rate', 0):.1f}%")
                 except:
                     pass
@@ -2102,8 +2102,8 @@ class ConsciousnessNetwork:
     def _answer_risk_assessment(self, question: str, market_data: Dict, user_context: Dict, engine_data: Dict) -> str:
         """تقييم المخاطر"""
         msg_lower = question.lower()
-        asset = "eurusd" if "usd" in msg_lower or "euro" in msg_lower or "يورو" in msg_lower else "usdjpy"
-        asset_label = "EUR/USD" if asset == "eurusd" else "USD/JPY"
+        asset = "oil" if "فضة" not in msg_lower and "silver" not in msg_lower else "silver"
+        asset_label = "النفط" if asset == "oil" else "الفضة"
         
         risk_data = engine_data.get('risk_master', {})
         risk_level = risk_data.get('level', 'medium')
@@ -2208,10 +2208,10 @@ class ConsciousnessNetwork:
     def _answer_technical_indicators(self, question: str, market_data: Dict, user_context: Dict, engine_data: Dict) -> str:
         """📊 المؤشرات الفنية"""
         msg_lower = question.lower()
-        asset = "eurusd"
+        asset = "oil"
         if "فضة" in msg_lower or "silver" in msg_lower:
-            asset = "usdjpy"
-        asset_label = "EUR/USD" if asset == "eurusd" else "USD/JPY"
+            asset = "silver"
+        asset_label = "النفط" if asset == "oil" else "الفضة"
         
         analysis = engine_data.get(f'{asset}_analysis', {})
         if not analysis:
@@ -2265,8 +2265,8 @@ class ConsciousnessNetwork:
     def _answer_support_resistance(self, question: str, market_data: Dict, user_context: Dict, engine_data: Dict) -> str:
         """🛡️ الدعم والمقاومة"""
         msg_lower = question.lower()
-        asset = "eurusd" if "usd" in msg_lower or "euro" in msg_lower or "يورو" in msg_lower else "usdjpy"
-        asset_label = "EUR/USD" if asset == "eurusd" else "USD/JPY"
+        asset = "oil" if "فضة" not in msg_lower and "silver" not in msg_lower else "silver"
+        asset_label = "النفط" if asset == "oil" else "الفضة"
         
         analysis = engine_data.get(f'{asset}_analysis', {})
         if not analysis:
@@ -2301,8 +2301,8 @@ class ConsciousnessNetwork:
     def _answer_prediction_with_all_engines(self, question: str, market_data: Dict, user_context: Dict, engine_data: Dict) -> str:
         """🔮 التوقعات"""
         msg_lower = question.lower()
-        asset = "eurusd" if "usd" in msg_lower or "euro" in msg_lower or "يورو" in msg_lower else "usdjpy"
-        asset_label = "EUR/USD" if asset == "eurusd" else "USD/JPY"
+        asset = "oil" if "فضة" not in msg_lower and "silver" not in msg_lower else "silver"
+        asset_label = "النفط" if asset == "oil" else "الفضة"
         
         oracle_data = engine_data.get(f'oracle_{asset}', {})
         emotion = user_context.get('prometheus_emotion', 'neutral')
@@ -2375,8 +2375,8 @@ class ConsciousnessNetwork:
     def _answer_virtual_trade(self, question: str, market_data: Dict, user_context: Dict, engine_data: Dict) -> str:
         """📊 تحليل صفقة مقترحة"""
         msg_lower = question.lower()
-        asset = "eurusd" if "usd" in msg_lower or "euro" in msg_lower or "يورو" in msg_lower else "usdjpy"
-        asset_label = "EUR/USD" if asset == "eurusd" else "USD/JPY"
+        asset = "oil" if "فضة" not in msg_lower and "silver" not in msg_lower else "silver"
+        asset_label = "النفط" if asset == "oil" else "الفضة"
         
         analysis = engine_data.get(f'{asset}_analysis', {})
         if not analysis:

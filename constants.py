@@ -29,8 +29,8 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 GIST_BASE_URL = "https://api.github.com/gists"
 GIST_IDS = {
-    "trades_oil": os.getenv("GIST_TRADES_OIL", ""),
-    "trades_silver": os.getenv("GIST_TRADES_SILVER", ""),
+    "trades_eurusd": os.getenv("GIST_TRADES_EURUSD", ""),
+    "trades_usdjpy": os.getenv("GIST_TRADES_USDJPY", ""),
     "config": os.getenv("GIST_CONFIG", ""),
     "narrative": os.getenv("GIST_NARRATIVE", ""),
 }
@@ -44,26 +44,26 @@ GIST_HEADERS = {
 # ملفات البيانات
 # =====================================================================
 
-TRADES_FILE_OIL = "trades_history_oil.json"
-TRADES_FILE_SILVER = "trades_history_silver.json"
-CURRENT_POSITION_FILE_OIL = "current_position_oil.json"
-CURRENT_POSITION_FILE_SILVER = "current_position_silver.json"
+TRADES_FILE_EURUSD = "trades_history_eurusd.json"
+TRADES_FILE_USDJPY = "trades_history_usdjpy.json"
+CURRENT_POSITION_FILE_EURUSD = "current_position_eurusd.json"
+CURRENT_POSITION_FILE_USDJPY = "current_position_usdjpy.json"
 
 # =====================================================================
 # الأقفال (Locks) للعمليات المتزامنة
 # =====================================================================
 
-FILE_LOCKS = {"oil": threading.Lock(), "silver": threading.Lock()}
+FILE_LOCKS = {"eurusd": threading.Lock(), "usdjpy": threading.Lock()}
 GROQ_REQUEST_LOG = []
 GROQ_MAX_REQUESTS_PER_MINUTE = 20
 GROQ_REQUEST_LOCK = threading.Lock()
 TELEGRAM_QUEUE = queue.Queue()
-MONITOR_TRIGGER = {"oil": None, "silver": None}
+MONITOR_TRIGGER = {"eurusd": None, "usdjpy": None}
 MONITOR_TRIGGER_LOCK = threading.Lock()
 CURRENT_OFFSET = 0
 OFFSET_LOCK = threading.Lock()
-last_signal_states = {"oil": {"signal": "WAIT", "time": 0}, "silver": {"signal": "WAIT", "time": 0}}
-last_signal_time = {"oil": 0, "silver": 0}
+last_signal_states = {"eurusd": {"signal": "WAIT", "time": 0}, "usdjpy": {"signal": "WAIT", "time": 0}}
+last_signal_time = {"eurusd": 0, "usdjpy": 0}
 LAST_SIGNAL_LOCK = threading.Lock()
 SIGNAL_COOLDOWN = 3600
 

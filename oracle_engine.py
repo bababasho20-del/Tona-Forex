@@ -1179,7 +1179,7 @@ if __name__ == "__main__":
     
     # اختبار التنبؤ
     print("\n1️⃣ توليد التنبؤ:")
-    prediction = oracle.generate_prediction('oil', state, horizon='12h')
+    prediction = oracle.generate_prediction('eurusd', state, horizon='12h')
     
     print(f"   الاتجاه: {prediction['ensemble_confidence']:.0%} ثقة - {prediction['scenarios'][0]['name']}")
     print(f"   السيناريوهات: {len(prediction['scenarios'])}")

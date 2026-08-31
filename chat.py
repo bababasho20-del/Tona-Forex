@@ -340,7 +340,7 @@ def build_chat_context(text: str, chat_id: str) -> Dict:
             if hasattr(ORACLE, 'get_predictions'):
                 context["oracle"] = ORACLE.get_predictions(context)
             elif hasattr(ORACLE, 'generate_prediction'):
-                context["oracle"] = ORACLE.generate_prediction("oil", {})
+                context["oracle"] = ORACLE.generate_prediction("eurusd", {})
         except Exception as e:
             logger.warning(f"⚠️ Oracle فشل: {e}")
 
@@ -526,7 +526,7 @@ def tool_get_open_trades() -> str:
             trade_type = trade.get('type', 'BUY')
             price = 0
             try:
-                symbol = "USOIL_USDT" if asset == "oil" else "SILVER_USDT"
+                symbol = "EURUSD" if asset == "eurusd" else "USDJPY"
                 data = get_mexc_candles(symbol, "Min1", 5)
                 if data and data.get("closes"):
                     price = data["closes"][-1]
@@ -555,7 +555,7 @@ def tool_get_open_trades() -> str:
 
 def tool_get_market_analysis(asset_type: str, context_cache: dict = None) -> str:
     """تحليل فني شامل لأصل واحد مع جميع المؤشرات"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if context_cache and asset_type in context_cache:
@@ -662,7 +662,7 @@ def tool_get_profit_loss_by_date(days_ago: int) -> str:
 
 def tool_get_trade_recommendation(asset_type: str, context_cache: dict = None) -> str:
     """توصية تداولية مع درجة الثقة"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if context_cache and asset_type in context_cache:
@@ -731,7 +731,7 @@ def tool_get_learning_insights() -> str:
 
 def tool_analyze_current_trade_health(asset_type: str) -> str:
     """تحليل صحة الصفقة المفتوحة وتوصية"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     open_trade = get_current_open_trade(asset_type)
@@ -802,7 +802,7 @@ def tool_get_general_statistics() -> str:
 
 def tool_execute_close_trade(asset_type: str) -> str:
     """إغلاق صفقة مفتوحة"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
     open_trade = get_current_open_trade(asset_type)
     if not open_trade:
@@ -828,7 +828,7 @@ def tool_get_intelligence_report() -> str:
 
 def tool_get_price_prediction(asset_type: str, timeframe: str = "short") -> str:
     """توقع سعر الأصل (قصير/طويل المدى) - مع استخراج صحيح للأسعار"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     if ORACLE_AVAILABLE and ORACLE:
@@ -918,7 +918,7 @@ def tool_get_price_prediction(asset_type: str, timeframe: str = "short") -> str:
 
 def tool_get_trade_details(asset_type: str, trade_id: str = None) -> str:
     """تفاصيل صفقة محددة"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -940,7 +940,7 @@ def tool_get_trade_details(asset_type: str, trade_id: str = None) -> str:
 
 def tool_get_worst_best_trade(asset_type: str, period: str = "all") -> str:
     """أفضل وأسوأ صفقة"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -1000,8 +1000,8 @@ def tool_get_trade_history_summary(days: int = 7) -> str:
         days = 7
     cutoff = (datetime.now() - timedelta(days=days)).date()
     summary = {
-        "eurusd": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0},
-        "usdjpy": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0}
+        "oil": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0},
+        "silver": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0}
     }
     for asset in ["eurusd", "usdjpy"]:
         history = load_trades_history(asset)
@@ -1037,7 +1037,7 @@ def tool_get_trade_history_summary(days: int = 7) -> str:
 
 def tool_explain_decision(asset_type: str, decision_type: str = "close") -> str:
     """شرح سبب قرار معين"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     history = load_trades_history(asset_type)
@@ -1078,8 +1078,8 @@ def tool_get_weekly_report() -> str:
 def tool_get_market_correlation() -> str:
     """علاقة النفط بالفضة"""
     try:
-        oil_analysis, _ = perform_comprehensive_analysis("oil", False, None)
-        silver_analysis, _ = perform_comprehensive_analysis("silver", False, None)
+        oil_analysis, _ = perform_comprehensive_analysis("eurusd", False, None)
+        silver_analysis, _ = perform_comprehensive_analysis("usdjpy", False, None)
 
         oil_trend = oil_analysis.get('indicators', {}).get('trend', {}).get('current_trend', 'محايد') if oil_analysis else 'محايد'
         silver_trend = silver_analysis.get('indicators', {}).get('trend', {}).get('current_trend', 'محايد') if silver_analysis else 'محايد'
@@ -1108,7 +1108,7 @@ def tool_get_market_correlation() -> str:
 
 def tool_modify_trade_sl_tp(asset_type: str, new_sl: float = None, new_tp: float = None) -> str:
     """تعديل وقف الخسارة/الهدف لصفقة مفتوحة"""
-    if asset_type not in ["eurusd", "usdjpy"]:
+    if asset_type not in ["oil", "silver"]:
         return "خطأ: asset_type يجب أن يكون oil أو silver"
 
     open_trade = get_current_open_trade(asset_type)
@@ -1256,7 +1256,7 @@ class SmartConversationManager:
                 elif msg.get('role') == 'user':
                     user_prompt = msg.get('content', '')
             full_prompt = f"{system_prompt}\n\n{TOOLS_DESCRIPTIONS}\n\n{user_prompt}\n\n"
-            full_prompt += "إذا كان السؤال يتطلب بيانات من البوت، اذكر اسم الأداة المطلوبة بين قوسين مع المعاملات (مثل: get_market_analysis(asset_type='oil')). وإلا أجب مباشرة."
+            full_prompt += "إذا كان السؤال يتطلب بيانات من البوت، اذكر اسم الأداة المطلوبة بين قوسين مع المعاملات (مثل: get_market_analysis(asset_type='eurusd')). وإلا أجب مباشرة."
             response = self.gemini_model.generate_content(
                 full_prompt,
                 generation_config={"max_output_tokens": max_tokens, "temperature": 0.3}
@@ -1581,8 +1581,8 @@ class SmartConversationManager:
             
             if oil_price == 0 or silver_price == 0:
                 try:
-                    oil_d = get_mexc_candles("USOIL_USDT", "Min1", 5)
-                    silver_d = get_mexc_candles("SILVER_USDT", "Min1", 5)
+                    oil_d = get_mexc_candles("EURUSD", "Min1", 5)
+                    silver_d = get_mexc_candles("USDJPY", "Min1", 5)
                     if oil_d and oil_d.get("closes"):
                         oil_price = oil_d["closes"][-1]
                     if silver_d and silver_d.get("closes"):
@@ -1782,8 +1782,8 @@ def generate_enhanced_fallback(text: str, context: Dict) -> str:
             
             if oil_price == 0 or silver_price == 0:
                 try:
-                    oil_d = get_mexc_candles("USOIL_USDT", "Min1", 5)
-                    silver_d = get_mexc_candles("SILVER_USDT", "Min1", 5)
+                    oil_d = get_mexc_candles("EURUSD", "Min1", 5)
+                    silver_d = get_mexc_candles("USDJPY", "Min1", 5)
                     if oil_d and oil_d.get("closes"):
                         oil_price = oil_d["closes"][-1]
                     if silver_d and silver_d.get("closes"):
@@ -1849,7 +1849,7 @@ def generate_enhanced_fallback(text: str, context: Dict) -> str:
                     price = item.get('price', 0)
                     if price == 0:
                         try:
-                            symbol = "USOIL_USDT" if asset == "oil" else "SILVER_USDT"
+                            symbol = "EURUSD" if asset == "eurusd" else "USDJPY"
                             d = get_mexc_candles(symbol, "Min1", 5)
                             if d and d.get("closes"):
                                 price = d["closes"][-1]
@@ -1875,8 +1875,8 @@ def generate_enhanced_fallback(text: str, context: Dict) -> str:
             else:
                 return f"💙 تولين: عذراً، تعذر الحصول على تحليل {asset} حالياً."
         
-        analysis_oil, _ = perform_comprehensive_analysis("oil", False, None)
-        analysis_silver, _ = perform_comprehensive_analysis("silver", False, None)
+        analysis_oil, _ = perform_comprehensive_analysis("eurusd", False, None)
+        analysis_silver, _ = perform_comprehensive_analysis("usdjpy", False, None)
         result = ""
         if analysis_oil and analysis_oil.get('price', 0) > 0:
             result += summarize_for_ai(analysis_oil, "النفط") + "\n\n"
@@ -2087,23 +2087,23 @@ def process_text_command(text, chat_id=None):
     """معالجة الأوامر النصية (تحتفظ بوظائفها القديمة)"""
     text_lower = text.lower()
 
-    close_keywords = ["تم إغلاق", "سأغلق", "أغلقت", "أغلق الصفقة", "أغلق صفقة", "أغلق صفقة النفط", "أغلق صفقة الفضة"]
+    close_keywords = ["تم إغلاق", "سأغلق", "أغلقت", "أغلق الصفقة", "أغلق صفقة", "أغلق صفقة EUR/USD", "أغلق صفقة USD/JPY"]
     for keyword in close_keywords:
         if keyword in text_lower:
             asset_type = None
             if "نفط" in text_lower or "oil" in text_lower:
-                asset_type = "oil"
+                asset_type = "eurusd"
             elif "فضة" in text_lower or "silver" in text_lower:
-                asset_type = "silver"
+                asset_type = "usdjpy"
             if not asset_type:
-                oil_trade = get_current_open_trade("oil")
-                silver_trade = get_current_open_trade("silver")
+                oil_trade = get_current_open_trade("eurusd")
+                silver_trade = get_current_open_trade("usdjpy")
                 if oil_trade and not silver_trade:
-                    asset_type = "oil"
+                    asset_type = "eurusd"
                 elif silver_trade and not oil_trade:
-                    asset_type = "silver"
+                    asset_type = "usdjpy"
                 else:
-                    queue_telegram_message("⚠️ يرجى تحديد الصفقة:\n• `أغلق صفقة النفط`\n• `أغلق صفقة الفضة`", chat_id)
+                    queue_telegram_message("⚠️ يرجى تحديد الصفقة:\n• `أغلق صفقة EUR/USD`\n• `أغلق صفقة USD/JPY`", chat_id)
                     return True
             if asset_type:
                 close_trade_manually(asset_type, "أمر يدوي من المستخدم")
@@ -2166,8 +2166,8 @@ def process_text_command(text, chat_id=None):
 
 def send_main_menu(chat_id):
     """إرسال القائمة الرئيسية (بدون أزرار TCN)"""
-    oil_open = get_current_open_trade("oil")
-    silver_open = get_current_open_trade("silver")
+    oil_open = get_current_open_trade("eurusd")
+    silver_open = get_current_open_trade("usdjpy")
 
     keyboard = [
         ["🛢️ تحليل النفط", "🥈 تحليل الفضة"],
@@ -2278,18 +2278,18 @@ def handle_message(text, chat_id):
 
     if text in ["🛢️ تحليل النفط", "🛢 تحليل النفط", "نفط", "oil", "تحليل النفط"]:
         queue_telegram_message("🔍 جاري التحليل الشامل للنفط...", chat_id)
-        threading.Thread(target=analyze_and_send, args=("oil", True, chat_id), daemon=True).start()
+        threading.Thread(target=analyze_and_send, args=("eurusd", True, chat_id), daemon=True).start()
         return
 
     if text in ["🥈 تحليل الفضة", "🥈 تحليل الفضة", "فضة", "silver", "تحليل الفضة"]:
         queue_telegram_message("🔍 جاري التحليل الشامل للفضة...", chat_id)
-        threading.Thread(target=analyze_and_send, args=("silver", True, chat_id), daemon=True).start()
+        threading.Thread(target=analyze_and_send, args=("usdjpy", True, chat_id), daemon=True).start()
         return
 
     if text in ["🔍 وضع الصفقة الحالية", "وضع الصفقة", "حالة", "check"]:
         def check_position():
             from analysis import analyze_open_trade
-            for asset_type in ["eurusd", "usdjpy"]:
+            for asset_type in ["oil", "silver"]:
                 open_trade = get_current_open_trade(asset_type)
                 if open_trade:
                     report = analyze_open_trade(asset_type, open_trade)
@@ -2304,7 +2304,7 @@ def handle_message(text, chat_id):
             from position_manager import calculate_statistics
             msg = "📊 <b>تقرير أداء البوت الشامل</b>\n"
             msg += "━" * 30 + "\n\n"
-            for asset_type, asset_name in [("eurusd", "EUR/USD"), ("usdjpy", "USD/JPY")]:
+            for asset_type, asset_name in [("oil", "النفط"), ("silver", "الفضة")]:
                 stats = calculate_statistics(asset_type)
                 emoji = "🛢️" if asset_type == "oil" else "🥈"
                 msg += f"{emoji} <b>{asset_name}</b>\n"
@@ -2377,8 +2377,8 @@ def handle_message(text, chat_id):
         return
 
     if text in ["❌ إغلاق الصفقة", "إغلاق", "close"]:
-        oil_trade = get_current_open_trade("oil")
-        silver_trade = get_current_open_trade("silver")
+        oil_trade = get_current_open_trade("eurusd")
+        silver_trade = get_current_open_trade("usdjpy")
         if not oil_trade and not silver_trade:
             queue_telegram_message("🔄 لا توجد صفقات مفتوحة للإغلاق.", chat_id)
         else:
@@ -2392,7 +2392,7 @@ def handle_message(text, chat_id):
                 msg += f"🛢️ <b>صفقة النفط</b>\n"
                 msg += f"   النوع: {oil_trade['type']}\n"
                 msg += f"   النتيجة: {AccountingSystem.format_profit(profit)}\n"
-                msg += "   ➡️ أرسل: `أغلق صفقة النفط`\n\n"
+                msg += "   ➡️ أرسل: `أغلق صفقة EUR/USD`\n\n"
             if silver_trade:
                 profit = AccountingSystem.calculate_profit_dollars(
                     silver_trade["entry_price"], 
@@ -2402,7 +2402,7 @@ def handle_message(text, chat_id):
                 msg += f"🥈 <b>صفقة الفضة</b>\n"
                 msg += f"   النوع: {silver_trade['type']}\n"
                 msg += f"   النتيجة: {AccountingSystem.format_profit(profit)}\n"
-                msg += "   ➡️ أرسل: `أغلق صفقة الفضة`"
+                msg += "   ➡️ أرسل: `أغلق صفقة USD/JPY`"
             queue_telegram_message(msg, chat_id)
         return
 
@@ -2681,7 +2681,7 @@ class HybridOrchestrator:
                 data["raw"] = tool_get_both_markets_analysis(context.get('market_snapshot', {}))
                 data["_market_query"] = True
             elif intent == "BEST_TRADE" or intent == "WORST_TRADE":
-                asset = params.get("asset_type", "eurusd")
+                asset = params.get("asset_type", "oil")
                 data["raw"] = tool_get_worst_best_trade(asset)
             elif intent == "TRADE_STATS":
                 data["raw"] = tool_get_general_statistics()
@@ -2690,14 +2690,14 @@ class HybridOrchestrator:
             elif intent == "INTELLIGENCE":
                 data["raw"] = tool_get_intelligence_report()
             elif intent == "PREDICTION":
-                asset = params.get("asset_type", "eurusd")
+                asset = params.get("asset_type", "oil")
                 timeframe = params.get("timeframe", "short")
                 data["raw"] = tool_get_price_prediction(asset, timeframe)
             elif intent == "CLOSE_TRADE":
-                asset = params.get("asset_type", "eurusd")
+                asset = params.get("asset_type", "oil")
                 data["raw"] = tool_execute_close_trade(asset)
             elif intent == "EXPLAIN_DECISION":
-                asset = params.get("asset_type", "eurusd")
+                asset = params.get("asset_type", "oil")
                 data["raw"] = tool_explain_decision(asset)
             elif intent == "WEEKLY_REPORT":
                 data["raw"] = tool_get_weekly_report()
@@ -2766,14 +2766,14 @@ class HybridOrchestrator:
         try:
             raw = data.get("raw", "{}")
             market_data = json.loads(raw) if isinstance(raw, str) else raw
-            oil = market_data.get("oil", {})
-            silver = market_data.get("silver", {})
+            oil = market_data.get("eurusd", {})
+            silver = market_data.get("usdjpy", {})
             oil_price = oil.get("price", 0)
             silver_price = silver.get("price", 0)
             if oil_price == 0 or silver_price == 0:
                 try:
-                    oil_d = get_mexc_candles("USOIL_USDT", "Min1", 5)
-                    silver_d = get_mexc_candles("SILVER_USDT", "Min1", 5)
+                    oil_d = get_mexc_candles("EURUSD", "Min1", 5)
+                    silver_d = get_mexc_candles("USDJPY", "Min1", 5)
                     if oil_d and oil_d.get("closes"):
                         oil_price = oil_d["closes"][-1]
                     if silver_d and silver_d.get("closes"):

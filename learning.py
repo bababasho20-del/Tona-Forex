@@ -298,7 +298,7 @@ def get_learning_stats_report(asset_type: Optional[str] = None) -> str:
                             data = json.load(f)
                             file_trades = data.get('trades', [])
                             if file_trades:
-                                asset = 'eurusd' if 'eurusd' in file_path else 'usdjpy'
+                                asset = 'oil' if 'oil' in file_path else 'silver'
                                 for t in file_trades:
                                     if 'asset_type' not in t:
                                         t['asset_type'] = asset

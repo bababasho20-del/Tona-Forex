@@ -39,7 +39,7 @@ def signal_scanner():
     logger.info("[Scanner] بدأ التشغيل")
     while True:
         start = time.time()
-        for asset_type in ["eurusd", "usdjpy"]:
+        for asset_type in ["oil", "silver"]:
             try:
                 analyze_and_send(asset_type, is_manual=False)
             except Exception as e:
@@ -74,7 +74,7 @@ def deep_monitor():
         except:
             pass
         
-        for asset_type in ["eurusd", "usdjpy"]:
+        for asset_type in ["oil", "silver"]:
             should_run = False
             reason = "scheduled"
             if now - last_scheduled[asset_type] >= MONITORING_INTERVAL:

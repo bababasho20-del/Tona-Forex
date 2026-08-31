@@ -1,33 +1,44 @@
-# حالة تحويل نسخة Forex — مكتملة
+# حالة تحويل نسخة Forex
 
-هذه الحزمة هي نسخة Forex مستقلة لزوجي EUR/USD وUSD/JPY فقط.
+## ملفات أُعيد إنشاؤها من الصفر
 
-## النطاق
-- الماسح الأساسي: Min5 كل 60 ثانية.
-- HealthCheck: كل 300 ثانية ولا يملك صلاحية تشغيل الماسح.
-- التحليل الشامل: 5m / 15m / 1h / 4h.
-- مصدر بيانات السوق الأساسي: Twelve Data.
-- Yahoo غير مستخدم افتراضياً؛ لا يُفعّل إلا صراحةً عبر ALLOW_YAHOO_FALLBACK=true إذا لزم الأمر.
-- التداول محاكاة فقط.
-- استراتيجية الدخول SuperTrend/VPT محمية ولا تستبدلها طبقة الذكاء.
-- التعلم والأنماط والتنبؤات محصورة في EUR/USD وUSD/JPY.
+```text
+main.py
+risk_master.py
+market_analyzer.py
+advanced_indicators.py
+learning_db.py
+pattern_discovery.py
+```
 
-## إصلاحات التحويل
-- إزالة مسارات التعلم التي كانت تمرر oil/silver إلى LearningDatabase.
-- تحديث Adaptive Learning وAI Brain وMemory وAdvisor والطبقات المساعدة إلى أصول Forex.
-- تحديث Tona Intelligence لاستخدام شموع Forex المحقونة بدلاً من MEXC.
-- إصلاح قياس نوافذ الأخبار ليعمل على EUR/USD وUSD/JPY.
-- توحيد إعدادات SuperTrend بين الماسح والتحليل الشامل.
-- منع إعدادات Gist القديمة من إعادة أصول أو فريمات غير Forex.
-- توحيد السجل ومنع propagation المكرر.
+## ملفات اختبار جديدة
 
-## إعدادات الاستراتيجية
-- EUR/USD: SuperTrend period 50، multiplier 2.2، VPT 10، Min5.
-- USD/JPY: SuperTrend period 60، multiplier 2.5، VPT 10، Min5.
-- SL = 2 ATR، TP = 3 ATR، RR الاسمي 1:1.5.
+```text
+test_risk_master.py
+test_market_analyzer.py
+test_advanced_indicators.py
+test_learning_db.py
+test_pattern_discovery.py
+```
 
-## الاختبارات
-تم اجتياز اختبارات الوحدات الخمسة الأساسية، وفحص الصياغة لجميع ملفات Python.
+## ملفات مرفقة من الأرشيف ولم تُحوّل بعد
 
-## ملاحظة
-بيانات Twelve Data تعتمد على خطة الحساب وحدودها ومفتاح API الموجود في بيئة التشغيل. لا توجد في الحزمة أسرار مضمّنة.
+بقية ملفات Python في الحزمة مرفقة لتسهيل العمل، لكنها ما زالت تحتاج مراجعة وتحويلًا حسب اعتمادياتها، خصوصًا محركات التعلم، القرار، الذاكرة، البيانات، المحادثة، والمحركات الذكية.
+
+## ما تم استبعاده
+
+تم استبعاد قواعد وملفات بيانات النفط والفضة والملف غير الصالح نحويًا `omniscient_core_v5.py` وملف `Maiin` وملف الإزاحة المحلي.
+
+## نتيجة الفحص
+
+نجحت اختبارات الصياغة واختبارات الوحدات للملفات الستة الأساسية والملفات الاختبارية. لا يعني ذلك أن بقية المحركات القديمة متوافقة أو أن النظام جاهز للتداول الحقيقي.
+
+## ترتيب العمل التالي
+
+1. `adaptive_learning_engine.py`
+2. `pattern_analyzer.py`
+3. `predictor.py`
+4. `decision_matrix.py`
+5. `db_manager.py` و`supabase_bridge.py`
+6. `memory.py` و`context_memory.py` و`context_builder.py`
+7. محركات المحادثة والمحركات الذكية

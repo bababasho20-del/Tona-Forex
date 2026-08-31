@@ -14,8 +14,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
 from constants import (
-    logger, FILE_LOCKS, TRADES_FILE_OIL, TRADES_FILE_SILVER,
-    CURRENT_POSITION_FILE_OIL, CURRENT_POSITION_FILE_SILVER,
+    logger, FILE_LOCKS, TRADES_FILE_EURUSD, TRADES_FILE_USDJPY,
+    CURRENT_POSITION_FILE_EURUSD, CURRENT_POSITION_FILE_USDJPY,
     MONITOR_TRIGGER, MONITOR_TRIGGER_LOCK,
     last_signal_states, last_signal_time, LAST_SIGNAL_LOCK
 )
@@ -69,7 +69,7 @@ def load_config():
     """تحميل إعدادات الاستراتيجية من Gist أو الملف المحلي"""
     default_config = {
         "strategies": {
-            "oil": {
+            "eurusd": {
                 "st_multiplier": 1.5,
                 "st_period": 100,
                 "vpt_len": 10,
@@ -101,7 +101,7 @@ def load_config():
                 "min_rr_dynamic": 1.0,
                 "atr_period_dynamic": 14,
             },
-            "silver": {
+            "usdjpy": {
                 "st_multiplier": 2.2,
                 "st_period": 100,
                 "vpt_len": 10,
@@ -518,12 +518,12 @@ def cleanup_stuck_trades_on_startup():
                 pass
     
     with MONITOR_TRIGGER_LOCK:
-        MONITOR_TRIGGER["oil"] = None
-        MONITOR_TRIGGER["silver"] = None
+        MONITOR_TRIGGER["eurusd"] = None
+        MONITOR_TRIGGER["usdjpy"] = None
     
     with LAST_SIGNAL_LOCK:
-        last_signal_states["oil"] = {"signal": "WAIT", "time": 0}
-        last_signal_states["silver"] = {"signal": "WAIT", "time": 0}
+        last_signal_states["eurusd"] = {"signal": "WAIT", "time": 0}
+        last_signal_states["usdjpy"] = {"signal": "WAIT", "time": 0}
     
     if cleaned > 0 or added > 0:
         logger.info(f"✅ تم تنظيف {cleaned} صفقة عالقة وإضافة {added} صفقة جديدة")
@@ -547,7 +547,7 @@ def close_trade_virtual(asset_type, reason="أمر افتراضي", current_pric
     from api_clients import get_mexc_candles
     from analysis import perform_comprehensive_analysis
 
-    symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
+    symbol = "EURUSD" if asset_type == "eurusd" else "USDJPY"
     if current_price is None:
         data = get_mexc_candles(symbol, "Min1", 5)
         current_price = data["closes"][-1] if data and data.get("closes") else open_trade["entry_price"]
@@ -770,7 +770,7 @@ def close_trade_virtual(asset_type, reason="أمر افتراضي", current_pric
         logger.error(f"❌ فشل حفظ الصفقة في قواعد التعلم: {e}")
 
     # ── 7. إرسال رسالة الإغلاق للمستخدم ──
-    asset_label = "النفط" if asset_type == "oil" else "الفضة"
+    asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
     msg = f"✅ **تم إغلاق صفقة {asset_label}**\n"
     msg += f"📊 سعر الدخول: ${fmt_price(entry_price, asset_type)}\n"
     msg += f"📊 سعر الخروج: ${fmt_price(current_price, asset_type)}\n"
@@ -932,7 +932,7 @@ def check_distance_warnings(asset_type, current_price, open_trade):
     current_distance = abs(current_price - sl)
     distance_pct = current_distance / total_distance
 
-    asset_label = "النفط" if asset_type == "oil" else "الفضة"
+    asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
 
     for level, config in WARNING_LEVELS["distance_sl"].items():
         if distance_pct <= config["threshold_pct"]:
@@ -969,7 +969,7 @@ def check_adx_warnings(asset_type, adx, open_trade):
     for level, config in WARNING_LEVELS["adx_weak"].items():
         if adx < config["threshold"]:
             if should_send_warning(open_trade, "adx_weak", level):
-                asset_label = "النفط" if asset_type == "oil" else "الفضة"
+                asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
                 msg = f"{config['emoji']} <b>{config['label']}:</b> صفقة {asset_label}\n"
                 msg += f"📊 ADX: {adx:.1f} - لا يوجد زخم تأكيدي\n"
                 
@@ -990,7 +990,7 @@ def check_volume_warnings(asset_type, vol_ratio, open_trade):
     for level, config in WARNING_LEVELS["volume_low"].items():
         if vol_ratio < config["threshold"]:
             if should_send_warning(open_trade, "volume_low", level):
-                asset_label = "النفط" if asset_type == "oil" else "الفضة"
+                asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
                 msg = f"{config['emoji']} <b>{config['label']}:</b> صفقة {asset_label}\n"
                 msg += f"📊 نسبة الحجم: {vol_ratio:.2f}x - حركة ضعيفة\n"
                 

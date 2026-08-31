@@ -12,9 +12,10 @@ GIST_BASE_URL = "https://api.github.com/gists"
 
 # IDs من الخطوة 3
 GIST_IDS = {
-    "trades_oil": os.getenv("GIST_TRADES_OIL", ""),
-    "trades_silver": os.getenv("GIST_TRADES_SILVER", ""),
+    "trades_eurusd": os.getenv("GIST_TRADES_EURUSD", ""),
+    "trades_usdjpy": os.getenv("GIST_TRADES_USDJPY", ""),
     "config": os.getenv("GIST_CONFIG", ""),
+    "narrative": os.getenv("GIST_NARRATIVE", ""),
 }
 
 HEADERS = {
@@ -121,8 +122,8 @@ def load_config_cloud():
     key = "config"
     default = {
         "strategies": {
-            "oil": {"st_multiplier": 2.5, "vpt_ema_length": 10, "use_rsi_filter": False, "use_macd_filter": False, "rsi_min": 35, "rsi_max": 65},
-            "silver": {"st_multiplier": 1.5, "vpt_ema_length": 10, "use_rsi_filter": True, "use_macd_filter": True, "rsi_min": 35, "rsi_max": 65}
+            "eurusd": {"st_multiplier": 2.2, "st_period": 50, "vpt_ema_length": 14, "base_timeframe": "Min5", "use_rsi_filter": False, "use_macd_filter": False, "rsi_min": 35, "rsi_max": 65},
+            "usdjpy": {"st_multiplier": 2.5, "st_period": 60, "vpt_ema_length": 10, "base_timeframe": "Min5", "use_rsi_filter": False, "use_macd_filter": False, "rsi_min": 35, "rsi_max": 65}
         },
         "system": {"bot_name": "تولين", "developer": "بسام الحوباني", "version": "V11.1"}
     }

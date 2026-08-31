@@ -423,6 +423,7 @@ except ImportError as e:
 # ====================================================================================
 
 logger = logging.getLogger("TonaPrometheus")
+# Prevent duplicate records through the root logger; this bot owns its handlers.
 logger.propagate = False
 
 # الفريمات الرسمية للتحليل الشامل: لا تُحسب أي مفاتيح إضافية ضمن التوافق.
@@ -433,12 +434,12 @@ FOREX_INSTRUMENTS = {
     "eurusd": {
         "symbol": "EURUSD", "display": "EUR/USD", "pip_size": 0.0001,
         "digits": 5, "base_currency": "EUR", "quote_currency": "USD",
-        "default_st_multiplier": 2.2, "default_st_period": 50, "default_max_spread_pips": 1.5,
+        "default_st_multiplier": 2.5, "default_max_spread_pips": 1.5,
     },
     "usdjpy": {
         "symbol": "USDJPY", "display": "USD/JPY", "pip_size": 0.01,
         "digits": 3, "base_currency": "USD", "quote_currency": "JPY",
-        "default_st_multiplier": 2.5, "default_st_period": 60, "default_max_spread_pips": 2.0,
+        "default_st_multiplier": 2.5, "default_max_spread_pips": 2.0,
     },
 }
 FOREX_ASSETS = tuple(FOREX_INSTRUMENTS)
@@ -2855,11 +2856,24 @@ def load_config():
         "system": {
             "bot_name": "تولين",
             "developer": "بسام الحوباني",
-            "version": "V14.4-FOREX-FULL-CORRECTED"
+            "version": "V12.0"
         }
     }
     try:
         cloud = load_json_from_gist("config", default_config)
+        # Forex isolation: never inherit legacy oil/silver strategies from an old Gist.
+        if not isinstance(cloud, dict):
+            cloud = {}
+        cloud["strategies"] = {
+            asset: dict(cloud.get("strategies", {}).get(asset, {}))
+            for asset in ("eurusd", "usdjpy")
+            if isinstance(cloud.get("strategies", {}).get(asset, {}), dict)
+        }
+        for asset in ("eurusd", "usdjpy"):
+            defaults = default_config["strategies"][asset]
+            cloud["strategies"].setdefault(asset, {})
+            for k, v in defaults.items():
+                cloud["strategies"][asset].setdefault(k, v)
         for key, val in default_config.items():
             if key not in cloud:
                 cloud[key] = val
@@ -2867,17 +2881,8 @@ def load_config():
                 for sub_key, sub_val in val.items():
                     if sub_key not in cloud[key]:
                         cloud[key][sub_key] = sub_val
-        # Forex-only runtime contract: never allow legacy oil/silver settings
-        cloud["strategies"] = {
-            "eurusd": {**default_config["strategies"]["eurusd"], **(cloud.get("strategies", {}).get("eurusd", {}) or {})},
-            "usdjpy": {**default_config["strategies"]["usdjpy"], **(cloud.get("strategies", {}).get("usdjpy", {}) or {})},
-        }
-        for _instrument, _cfg in cloud["strategies"].items():
-            _cfg["base_timeframe"] = "Min5"
-            _cfg["timeframes"] = ["Min5", "Min15", "Min60", "Hour4"]
-        cloud["system"] = {**default_config["system"], **(cloud.get("system", {}) or {})}
         return cloud
-    except Exception:
+    except:
         return default_config
 
 # ================================================================
@@ -6393,12 +6398,11 @@ def perform_comprehensive_analysis(asset_type, is_monitoring=False, open_trade=N
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
         
         # SuperTrend
-        _strategy_cfg = load_config().get("strategies", {}).get(asset_type, {})
         st_line_arr, trend, _ = calculate_supertrend_vpt_correct(
             data,
-            st_mult=float(_strategy_cfg.get("st_multiplier", 2.2 if asset_type == "eurusd" else 2.5)),
-            st_period=int(_strategy_cfg.get("st_period", 50 if asset_type == "eurusd" else 60)),
-            vpt_len=int(_strategy_cfg.get("vpt_len", 10))
+            st_mult=2.5 if asset_type == "eurusd" else 2.2,
+            st_period=100,
+            vpt_len=10
         )
         
         # ── ✅ تحليل الفريمات الأربعة (القاعدة الذهبية) ──
@@ -8085,8 +8089,8 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     strategy_config = config["strategies"][asset_type]
 
     base_timeframe = strategy_config.get("base_timeframe", "Min5")
-    st_multiplier = strategy_config.get("st_multiplier", 2.2 if asset_type == "eurusd" else 2.5)
-    st_period = strategy_config.get("st_period", 50 if asset_type == "eurusd" else 60)
+    st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
+    st_period = strategy_config.get("st_period", 100)
     vpt_len = strategy_config.get("vpt_len", 10)
 
     sltp_mode = strategy_config.get("sltp_mode", "ATR")
@@ -8321,7 +8325,7 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     for tf_name, tf_data in [("5m", results.get("5m")), ("15m", results.get("15m")), ("1h", results.get("1h")), ("4h", results.get("4h"))]:
         if tf_data and tf_data.get("closes") and len(tf_data["closes"]) >= 10:
             tcloses = tf_data["closes"]
-            st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=st_multiplier, st_period=st_period, vpt_len=vpt_len)
+            st_result = calculate_supertrend_vpt_correct(tf_data, st_mult=st_multiplier)
             if st_result is not None and len(st_result) == 3:
                 st_l, tr, vpt_tf = st_result
                 tf_rsi = calculate_rsi_7(tcloses)[-1] if len(tcloses) >= 7 else None
@@ -14344,16 +14348,24 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     except Exception as e:
         logger.warning(f"[UnifiedLearning] تعذر حساب الذاكرة التاريخية: {e}")
 
+    has_learning_history = bool(adaptive.get("has_historical_data", False))
     probability = float(adaptive.get("probability", 50) or 50)
     false_score = int(adaptive.get("false_signal_score", 0) or 0)
+    if not has_learning_history:
+        # No historical Forex evidence exists yet. Keep the research layer neutral
+        # and never present a Bayesian prior as learned success probability.
+        probability = 50.0
+        false_score = 0
     loss_similarity = memory.get("loss_similarity")
     win_similarity = memory.get("win_similarity")
     memory_warning = (
         loss_similarity is not None and win_similarity is not None and
         loss_similarity >= 80 and loss_similarity > win_similarity
     )
-    adaptive_warning = probability <= 35 or false_score >= 65
-    if memory_warning:
+    adaptive_warning = has_learning_history and (probability <= 35 or false_score >= 65)
+    if not has_learning_history:
+        opinion = "لا توجد بيانات تاريخية لصفقات الفوركس بعد؛ هذه أول مرحلة تعلم فعلية، لذلك لا توجد نسبة نجاح متعلمة."
+    elif memory_warning:
         opinion = "السياق الحالي أقرب إلى حالات خاسرة سابقة؛ مستوى الحذر مرتفع."
     elif adaptive_warning:
         opinion = "التعلم التكييفي يرى أن الإشارة تحمل خطرًا أعلى من المعتاد."
@@ -14365,11 +14377,16 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
     reasons = adaptive.get("false_signal_reasons", [])[:3] if isinstance(adaptive, dict) else []
     message = [f"🧠 **رأي الذاكرة والتعلم الموحد - {asset_label}**", ""]
-    message.append(f"🎯 احتمال النجاح الحالي: **{probability:.0f}%**")
-    message.append(f"🚨 مؤشر خطر الإشارة الكاذبة: **{false_score}%**")
+    if has_learning_history:
+        message.append(f"🎯 احتمال النجاح المتعلم: **{probability:.0f}%**")
+    else:
+        message.append("🎯 احتمال النجاح المتعلم: **غير متاح بعد — لا توجد صفقات تاريخية**")
+    message.append(f"🚨 مؤشر خطر الإشارة الكاذبة الحالي: **{false_score}%**")
     message.append(f"🧠 **الرأي:** {opinion}")
-    if adaptive.get("confidence") is not None:
+    if has_learning_history and adaptive.get("confidence") is not None:
         message.append(f"📊 ثقة النموذج: **{float(adaptive.get('confidence', 0) or 0):.0f}%**")
+    elif not has_learning_history:
+        message.append("📊 ثقة النموذج: **غير متاحة بعد — بانتظار بيانات فعلية**")
     if adaptive.get("similar_count") is not None:
         message.append(f"📚 الحالات المشابهة: **{int(adaptive.get('similar_count', 0) or 0)}**")
     if memory_warning:
@@ -14384,6 +14401,7 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     open_trade["unified_learning_opinion"] = {
         "probability": probability,
         "false_signal_score": false_score,
+        "has_historical_data": has_learning_history,
         "loss_similarity": loss_similarity,
         "win_similarity": win_similarity,
         "timestamp": datetime.now().isoformat()
@@ -14670,7 +14688,7 @@ def _dream_worker():
 # ============================================================================
 
 def health_check():
-    logger.info("[Health] بدأ التشغيل")
+    logger.info("[Health] بدأ التشغيل (كل 5 دقائق)")
     while True:
         time.sleep(300)
         queue_size = TELEGRAM_QUEUE.qsize()

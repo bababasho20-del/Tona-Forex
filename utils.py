@@ -32,6 +32,15 @@ def get_mexc_candles(symbol, interval="Min15", limit=200):
         return None
 
 
+
+# Forex-only local storage helpers (kept here for legacy modules that import them).
+def get_trades_file(asset_type):
+    return {"eurusd": "trades_history_eurusd.json", "usdjpy": "trades_history_usdjpy.json"}[str(asset_type).lower()]
+
+def get_position_file(asset_type):
+    return {"eurusd": "current_position_eurusd.json", "usdjpy": "current_position_usdjpy.json"}[str(asset_type).lower()]
+
+
 # ============================================================
 # 📊 دوال المؤشرات الفنية
 # ============================================================
