@@ -423,6 +423,8 @@ except ImportError as e:
 # ====================================================================================
 
 logger = logging.getLogger("TonaPrometheus")
+# Prevent duplicate records through the root logger; this bot owns its handlers.
+logger.propagate = False
 
 # الفريمات الرسمية للتحليل الشامل: لا تُحسب أي مفاتيح إضافية ضمن التوافق.
 CANONICAL_ANALYSIS_TIMEFRAMES = ("5m", "15m", "1h", "4h")
@@ -2799,11 +2801,11 @@ def load_config():
     default_config = {
         "strategies": {
             "eurusd": {
-                "st_multiplier": 2.5,
+                "st_multiplier": 2.2,
                 "st_period": 50,
                 "vpt_len": 10,
                 "vpt_ema_length": 14,
-                "base_timeframe": "Min15",
+                "base_timeframe": "Min5",
                 "use_rsi_filter": False,
                 "use_macd_filter": False,
                 "use_adx_filter": False,
@@ -2826,10 +2828,10 @@ def load_config():
             },
             "usdjpy": {
                 "st_multiplier": 2.5,
-                "st_period": 100,
+                "st_period": 60,
                 "vpt_len": 10,
                 "vpt_ema_length": 10,
-                "base_timeframe": "Min15",
+                "base_timeframe": "Min5",
                 "use_rsi_filter": False,
                 "use_macd_filter": False,
                 "use_adx_filter": False,
@@ -2859,6 +2861,19 @@ def load_config():
     }
     try:
         cloud = load_json_from_gist("config", default_config)
+        # Forex isolation: never inherit legacy oil/silver strategies from an old Gist.
+        if not isinstance(cloud, dict):
+            cloud = {}
+        cloud["strategies"] = {
+            asset: dict(cloud.get("strategies", {}).get(asset, {}))
+            for asset in ("eurusd", "usdjpy")
+            if isinstance(cloud.get("strategies", {}).get(asset, {}), dict)
+        }
+        for asset in ("eurusd", "usdjpy"):
+            defaults = default_config["strategies"][asset]
+            cloud["strategies"].setdefault(asset, {})
+            for k, v in defaults.items():
+                cloud["strategies"][asset].setdefault(k, v)
         for key, val in default_config.items():
             if key not in cloud:
                 cloud[key] = val
@@ -8073,7 +8088,9 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
     config = load_config()
     strategy_config = config["strategies"][asset_type]
 
-    base_timeframe = strategy_config.get("base_timeframe", "Min5")
+    # Scanner is hard-locked to the strategy trading timeframe: Min5.
+    # Configuration cannot accidentally make the 60s scanner request another timeframe.
+    base_timeframe = "Min5"
     st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
     st_period = strategy_config.get("st_period", 100)
     vpt_len = strategy_config.get("vpt_len", 10)
@@ -14212,19 +14229,125 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # ============================================================================
-# الخيط 1: ماسح الإشارات (بدون تغيير)
+# الخيط 1: ماسح الإشارات — المصدر الوحيد للفحص الدوري كل 60 ثانية
 # ============================================================================
 
+def _scanner_check_supertrend_vpt(asset_type):
+    """
+    فحص الاستراتيجية فقط. لا يقوم بتحليل شامل ولا يستدعي أي فريم آخر.
+    نفس منطق SuperTrend/VPT الموجود في analyze_and_send، مع Min5 وشمعة
+    التأكيد المحددة في الإعدادات. هذه الدالة هي البوابة الوحيدة للفحص الدوري.
+    """
+    config = load_config()
+    strategy_config = config["strategies"][asset_type]
+    base_timeframe = "Min5"
+    st_multiplier = strategy_config.get("st_multiplier", 2.5 if asset_type == "eurusd" else 2.2)
+    st_period = strategy_config.get("st_period", 100)
+    vpt_len = strategy_config.get("vpt_len", 10)
+    confirmation_bars = strategy_config.get("confirmation_bars", 1)
+
+    symbol = get_instrument_spec(asset_type)["symbol"]
+    logger.info(
+        f"📊 [Scanner] استخدام الفريم الزمني {base_timeframe} لـ {asset_type} "
+        f"مع {confirmation_bars} شمعة تأكيد"
+    )
+
+    # IMPORTANT: this is the ONLY periodic market-data request in the 60s loop.
+    data = get_forex_candles(symbol, interval=base_timeframe, limit=200)
+    if not data or not data.get("closes") or len(data["closes"]) < 10:
+        logger.warning(f"⚠️ [Scanner] بيانات {asset_type} غير كافية للفحص")
+        return None
+
+    closes = data["closes"]
+    st_result = calculate_supertrend_vpt_correct(
+        data, st_mult=st_multiplier, st_period=st_period, vpt_len=vpt_len
+    )
+    if st_result is None or len(st_result) != 3:
+        logger.error(f"❌ [Scanner] فشل حساب VPT/SuperTrend لـ {asset_type}")
+        return None
+
+    st_line_arr, trend, vpt_ema = st_result
+    if len(vpt_ema) < 3 or len(st_line_arr) < 3 or len(trend) < 3:
+        logger.warning(f"⚠️ [Scanner] بيانات VPT/SuperTrend غير كافية لـ {asset_type}")
+        return None
+
+    previous_close = closes[-2]
+    current_close = closes[-1]
+    previous_st = st_line_arr[-2]
+    current_st = st_line_arr[-1]
+
+    # Preserve the original SuperTrend crossover/crossunder logic exactly.
+    crossover = previous_close <= previous_st and current_close > current_st
+    crossunder = previous_close >= previous_st and current_close < current_st
+
+    confirmation_ok = False
+    if crossover or crossunder:
+        confirmation_ok = True
+        if confirmation_bars > 0:
+            current_trend = trend[-1]
+            for i in range(1, confirmation_bars + 1):
+                if len(trend) > i and trend[-i] != current_trend:
+                    confirmation_ok = False
+                    logger.info(
+                        f"⏳ [Scanner] فشل التأكيد {asset_type}: "
+                        f"trend[-{i}]={trend[-i]} != {current_trend}"
+                    )
+                    break
+
+    signal = "BUY" if crossover and confirmation_ok else "SELL" if crossunder and confirmation_ok else "WAIT"
+    timestamps = data.get("timestamps", [])
+    candle_ts = timestamps[-1] if timestamps else None
+
+    logger.info(
+        f"🔍 [Scanner] {asset_type} {base_timeframe}: close={current_close:.5f}, "
+        f"ST={current_st:.5f}, crossover={crossover}, crossunder={crossunder}, "
+        f"confirmation={confirmation_ok}, signal={signal}"
+    )
+
+    if signal not in ("BUY", "SELL") or candle_ts is None:
+        return None
+
+    return {
+        "signal": signal,
+        "timestamp": candle_ts,
+        "key": f"{base_timeframe}|{candle_ts}|{signal}",
+    }
+
+
 def signal_scanner():
-    """ماسح الإشارات - يعمل كل 60 ثانية"""
-    logger.info("[Scanner] بدأ التشغيل")
+    """
+    الماسح الدوري الوحيد كل 60 ثانية.
+    دورة WAIT تفحص SuperTrend/VPT على Min5 فقط. التحليل الشامل لا يبدأ
+    إلا بعد ظهور إشارة مؤكدة جديدة. لا يتم استدعاء analyze_and_send في كل دورة.
+    """
+    logger.info(
+        "🚀 [Scanner] بدأ التشغيل — المصدر الوحيد لفحص السوق كل 60 ثانية | "
+        "SuperTrend/VPT فقط"
+    )
     while True:
         start = time.time()
         for asset_type in ["eurusd", "usdjpy"]:
             try:
+                result = _scanner_check_supertrend_vpt(asset_type)
+                if not result:
+                    continue
+
+                key = result["key"]
+                with SIGNAL_DEDUPE_LOCK:
+                    if LAST_PROCESSED_SIGNAL_CANDLE.get(asset_type) == key:
+                        logger.info(f"♻️ [Scanner] تجاهل إشارة مكررة: {asset_type} {key}")
+                        continue
+
+                # Only a NEW confirmed signal may enter full analysis.
+                logger.info(
+                    f"🚨 [Scanner] {asset_type}: إشارة {result['signal']} مؤكدة — "
+                    "بدء التحليل الشامل الآن فقط"
+                )
                 analyze_and_send(asset_type, is_manual=False)
+
             except Exception as e:
-                logger.error(f"[Scanner] خطأ في فحص {asset_type}: {e}")
+                logger.error(f"[Scanner] خطأ في فحص {asset_type}: {e}", exc_info=True)
+
         elapsed = time.time() - start
         time.sleep(max(0, SIGNAL_CHECK_INTERVAL - elapsed))
 
@@ -14333,16 +14456,24 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     except Exception as e:
         logger.warning(f"[UnifiedLearning] تعذر حساب الذاكرة التاريخية: {e}")
 
+    has_learning_history = bool(adaptive.get("has_historical_data", False))
     probability = float(adaptive.get("probability", 50) or 50)
     false_score = int(adaptive.get("false_signal_score", 0) or 0)
+    if not has_learning_history:
+        # No historical Forex evidence exists yet. Keep the research layer neutral
+        # and never present a Bayesian prior as learned success probability.
+        probability = 50.0
+        false_score = 0
     loss_similarity = memory.get("loss_similarity")
     win_similarity = memory.get("win_similarity")
     memory_warning = (
         loss_similarity is not None and win_similarity is not None and
         loss_similarity >= 80 and loss_similarity > win_similarity
     )
-    adaptive_warning = probability <= 35 or false_score >= 65
-    if memory_warning:
+    adaptive_warning = has_learning_history and (probability <= 35 or false_score >= 65)
+    if not has_learning_history:
+        opinion = "لا توجد بيانات تاريخية لصفقات الفوركس بعد؛ هذه أول مرحلة تعلم فعلية، لذلك لا توجد نسبة نجاح متعلمة."
+    elif memory_warning:
         opinion = "السياق الحالي أقرب إلى حالات خاسرة سابقة؛ مستوى الحذر مرتفع."
     elif adaptive_warning:
         opinion = "التعلم التكييفي يرى أن الإشارة تحمل خطرًا أعلى من المعتاد."
@@ -14354,11 +14485,16 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     asset_label = "EUR/USD" if asset_type == "eurusd" else "USD/JPY"
     reasons = adaptive.get("false_signal_reasons", [])[:3] if isinstance(adaptive, dict) else []
     message = [f"🧠 **رأي الذاكرة والتعلم الموحد - {asset_label}**", ""]
-    message.append(f"🎯 احتمال النجاح الحالي: **{probability:.0f}%**")
-    message.append(f"🚨 مؤشر خطر الإشارة الكاذبة: **{false_score}%**")
+    if has_learning_history:
+        message.append(f"🎯 احتمال النجاح المتعلم: **{probability:.0f}%**")
+    else:
+        message.append("🎯 احتمال النجاح المتعلم: **غير متاح بعد — لا توجد صفقات تاريخية**")
+    message.append(f"🚨 مؤشر خطر الإشارة الكاذبة الحالي: **{false_score}%**")
     message.append(f"🧠 **الرأي:** {opinion}")
-    if adaptive.get("confidence") is not None:
+    if has_learning_history and adaptive.get("confidence") is not None:
         message.append(f"📊 ثقة النموذج: **{float(adaptive.get('confidence', 0) or 0):.0f}%**")
+    elif not has_learning_history:
+        message.append("📊 ثقة النموذج: **غير متاحة بعد — بانتظار بيانات فعلية**")
     if adaptive.get("similar_count") is not None:
         message.append(f"📚 الحالات المشابهة: **{int(adaptive.get('similar_count', 0) or 0)}**")
     if memory_warning:
@@ -14373,6 +14509,7 @@ def check_unified_learning_warning(asset_type, current_analysis, open_trade):
     open_trade["unified_learning_opinion"] = {
         "probability": probability,
         "false_signal_score": false_score,
+        "has_historical_data": has_learning_history,
         "loss_similarity": loss_similarity,
         "win_similarity": win_similarity,
         "timestamp": datetime.now().isoformat()
@@ -14659,9 +14796,9 @@ def _dream_worker():
 # ============================================================================
 
 def health_check():
-    logger.info("[Health] بدأ التشغيل")
+    logger.info("[Health] بدأ التشغيل (كل 5 دقائق)")
     while True:
-        time.sleep(60)
+        time.sleep(300)
         queue_size = TELEGRAM_QUEUE.qsize()
         if queue_size > 50:
             logger.warning(f"[Health] Queue كبيرة: {queue_size} رسائل")
