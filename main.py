@@ -3497,8 +3497,8 @@ FOREX_ALLOW_TWELVE_FALLBACK = os.getenv("FOREX_ALLOW_TWELVE_FALLBACK", "false").
 def _normalize_forex_symbol(symbol):
     normalized = str(symbol or "").upper().replace("/", "").replace("_", "").replace("-", "")
     mapping = {
-        "EURUSD": ("EUR/USD", "EUR-USD"),
-        "USDJPY": ("USD/JPY", "USD-JPY"),
+        "EURUSD": ("EUR/USD", "EURUSD-USDT"),
+        "USDJPY": ("USD/JPY", "USDJPY-USDT"),
     }
     if normalized not in mapping:
         raise ValueError(f"Unsupported Forex instrument: {symbol}")
