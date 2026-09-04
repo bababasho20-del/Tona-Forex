@@ -3469,40 +3469,39 @@ def get_learning_data_source() -> str:
 # ====================================================================================
 
 # ====================================================================================
-# Forex data provider: BingX TradFi primary + optional Twelve Data fallback
+# Forex data provider: MEXC Futures public market data
 # ====================================================================================
 # IMPORTANT:
-# - SuperTrend/VPT scanner strategy is untouched.
-# - BingX is the primary source for EUR/USD and USD/JPY candles.
-# - Twelve Data is NOT queried by default. Enable it explicitly with
-#   FOREX_ALLOW_TWELVE_FALLBACK=true if a fallback is required.
-# - Market-data caching prevents duplicate requests during the same analysis cycle.
-BINGX_FOREX_CACHE = {}
-BINGX_FOREX_CACHE_LOCK = threading.RLock()
-BINGX_FOREX_CACHE_TTL = int(os.getenv("BINGX_FOREX_CACHE_TTL", "45"))
-BINGX_FOREX_BASE_URL = "https://open-api.bingx.com"
-BINGX_FOREX_KLINES_PATH = "/openApi/swap/v3/quote/klines"
-
-# Twelve Data remains an explicit emergency fallback only; it is disabled by default.
-TWELVE_DATA_CACHE = {}
-TWELVE_DATA_CACHE_LOCK = threading.RLock()
-TWELVE_DATA_RATE_LOCK = threading.Lock()
-TWELVE_DATA_LAST_REQUEST = 0.0
-TWELVE_DATA_MIN_INTERVAL = float(os.getenv("TWELVE_DATA_MIN_INTERVAL", "8.0"))
-TWELVE_DATA_CACHE_TTL = int(os.getenv("TWELVE_DATA_CACHE_TTL", "120"))
-TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
-FOREX_ALLOW_TWELVE_FALLBACK = os.getenv("FOREX_ALLOW_TWELVE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+# - SuperTrend/VPT strategy is untouched.
+# - The scanner remains the ONLY periodic 60-second market-data consumer.
+# - MEXC public REST is used only when a caller actually requests Forex candles.
+# - No BingX/Twelve Data fallback is performed, so a failed request cannot trigger
+#   a second provider request in the same scan cycle.
+# - EUR/USD is sourced from MEXC EUR_USDT.
+# - USD/JPY is derived from MEXC JPY_USDT by inversion:
+#       USDJPY = 1 / JPYUSD
+#   with OHLC transformed correctly (high/low are inverted and swapped).
+# - A short cache prevents duplicate requests when scanner/monitoring overlap.
+MEXC_FOREX_CACHE = {}
+MEXC_FOREX_CACHE_LOCK = threading.RLock()
+MEXC_FOREX_CACHE_TTL = int(os.getenv("MEXC_FOREX_CACHE_TTL", "45"))
+MEXC_FOREX_BASE_URL = "https://contract.mexc.com"
+MEXC_FOREX_KLINES_PATH = "/api/v1/contract/kline"
 
 
 def _normalize_forex_symbol(symbol):
     normalized = str(symbol or "").upper().replace("/", "").replace("_", "").replace("-", "")
     mapping = {
-        "EURUSD": ("EUR/USD", "EUR-USD"),
-        "USDJPY": ("USD/JPY", "USD-JPY"),
+        # MEXC provides a EUR_USDT contract; for the scanner it is treated as
+        # the EUR/USD research price because USDT is intended to track USD.
+        "EURUSD": {"mexc_symbol": "EUR_USDT", "mode": "direct"},
+        # MEXC provides JPY_USDT. Invert it to obtain USD/JPY.
+        "USDJPY": {"mexc_symbol": "JPY_USDT", "mode": "inverse"},
     }
     if normalized not in mapping:
         raise ValueError(f"Unsupported Forex instrument: {symbol}")
-    return normalized, mapping[normalized][0], mapping[normalized][1]
+    spec = mapping[normalized]
+    return normalized, spec["mexc_symbol"], spec["mode"]
 
 
 def _interval_seconds(interval):
@@ -3512,64 +3511,77 @@ def _interval_seconds(interval):
     }.get(str(interval), 900)
 
 
-def _bingx_interval(interval):
+def _mexc_interval(interval):
+    # MEXC Futures uses the same interval names as the documented contract API.
     return {
-        "Min1": "1m", "Min5": "5m", "Min15": "15m",
-        "Hour1": "1h", "Hour4": "4h", "Day1": "1d",
-    }.get(str(interval), "15m")
+        "Min1": "Min1", "Min5": "Min5", "Min15": "Min15",
+        "Hour1": "Min60", "Hour4": "Hour4", "Day1": "Day1",
+    }.get(str(interval), "Min15")
 
 
-def _parse_bingx_klines(payload, normalized, interval, limit):
+def _parse_mexc_klines(payload, normalized, interval, limit, mode):
     if not isinstance(payload, dict):
         return None, "invalid_json"
+    if payload.get("success") is False:
+        return None, str(payload.get("message") or payload.get("msg") or f"code={payload.get('code')}")
     code = payload.get("code")
-    if code not in (None, 0, "0"):
-        return None, str(payload.get("msg") or payload.get("message") or f"code={code}")
-    rows_raw = payload.get("data") or payload.get("rows") or []
-    if isinstance(rows_raw, dict):
-        rows_raw = rows_raw.get("data") or rows_raw.get("rows") or []
-    if not isinstance(rows_raw, list):
+    if code not in (None, 0, "0", 200, "200"):
+        return None, str(payload.get("message") or payload.get("msg") or f"code={code}")
+
+    raw = payload.get("data") or {}
+    if not isinstance(raw, dict):
         return None, "invalid_data"
 
-    rows = []
-    interval_sec = _interval_seconds(interval)
-    now_ms = int(time.time() * 1000)
-    for item in rows_raw:
-        try:
-            if isinstance(item, dict):
-                ts = int(float(item.get("time") or item.get("openTime") or item.get("timestamp")))
-                op = float(item.get("open")); hi = float(item.get("high"))
-                lo = float(item.get("low")); cl = float(item.get("close"))
-                vol = float(item.get("volume") or 0.0)
-                close_ts = item.get("closeTime")
-                close_ts = int(float(close_ts)) if close_ts is not None else ts + interval_sec * 1000
-            elif isinstance(item, (list, tuple)) and len(item) >= 6:
-                ts = int(float(item[0])); op = float(item[1]); hi = float(item[2])
-                lo = float(item[3]); cl = float(item[4]); vol = float(item[5] or 0.0)
-                close_ts = int(float(item[6])) if len(item) > 6 and item[6] not in (None, "") else ts + interval_sec * 1000
-            else:
-                continue
+    times = raw.get("time") or []
+    opens = raw.get("open") or []
+    closes = raw.get("close") or []
+    highs = raw.get("high") or []
+    lows = raw.get("low") or []
+    vols = raw.get("vol") or []
+    n = min(len(times), len(opens), len(closes), len(highs), len(lows))
+    if n < 5:
+        return None, f"insufficient_data:{n}"
 
-            # BingX timestamps are milliseconds; tolerate seconds defensively.
-            if ts < 10_000_000_000:
-                ts *= 1000
-            if close_ts < 10_000_000_000:
-                close_ts *= 1000
-            if close_ts > now_ms:
-                continue  # never feed the currently forming candle to SuperTrend
-            if not all(math.isfinite(x) for x in (op, hi, lo, cl, vol)):
+    interval_sec = _interval_seconds(interval)
+    now_sec = int(time.time())
+    rows = []
+    for i in range(n):
+        try:
+            ts = int(float(times[i]))
+            op = float(opens[i]); cl = float(closes[i])
+            hi = float(highs[i]); lo = float(lows[i])
+            vol = float(vols[i]) if i < len(vols) and vols[i] not in (None, "") else 0.0
+
+            # MEXC returns seconds for Futures kline timestamps.
+            if ts > 10_000_000_000:
+                ts //= 1000
+            # Never feed a currently forming candle into SuperTrend.
+            if ts + interval_sec > now_sec:
+                continue
+            if not all(math.isfinite(x) for x in (op, cl, hi, lo, vol)):
                 continue
             if hi < max(op, cl) or lo > min(op, cl) or hi < lo:
                 continue
-            rows.append((ts // 1000, op, hi, lo, cl, vol))
-        except (TypeError, ValueError, KeyError):
+
+            if mode == "inverse":
+                # y = JPY/USD -> x = USD/JPY = 1/y
+                if min(op, cl, hi, lo) <= 0:
+                    continue
+                x_open = 1.0 / op
+                x_close = 1.0 / cl
+                x_high = 1.0 / lo
+                x_low = 1.0 / hi
+                op, cl, hi, lo = x_open, x_close, x_high, x_low
+
+            rows.append((ts, op, hi, lo, cl, max(0.0, vol)))
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
             continue
 
     rows.sort(key=lambda row: row[0])
     if limit:
         rows = rows[-int(limit):]
     if len(rows) < 5:
-        return None, f"insufficient_data:{len(rows)}"
+        return None, f"insufficient_closed_data:{len(rows)}"
 
     return {
         "timestamps": [r[0] for r in rows],
@@ -3578,143 +3590,70 @@ def _parse_bingx_klines(payload, normalized, interval, limit):
         "lows": [r[3] for r in rows],
         "closes": [r[4] for r in rows],
         "volumes": [r[5] for r in rows],
-        "source": "BingX TradFi",
+        "source": "MEXC Futures",
         "source_symbol": normalized,
+        "provider_symbol": "EUR_USDT" if normalized == "EURUSD" else "JPY_USDT (inverted)",
         "is_research_data": True,
         "data_quality": "research",
         "provider_status": "ok",
     }, "ok"
 
 
-def _wait_for_twelve_data_slot():
-    global TWELVE_DATA_LAST_REQUEST
-    with TWELVE_DATA_RATE_LOCK:
-        now = time.monotonic()
-        delay = TWELVE_DATA_MIN_INTERVAL - (now - TWELVE_DATA_LAST_REQUEST)
-        if delay > 0:
-            time.sleep(delay)
-        TWELVE_DATA_LAST_REQUEST = time.monotonic()
-
-
-def _parse_twelve_data_payload(payload, symbol, interval, limit):
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("status") == "error" or payload.get("code"):
-        raise RuntimeError(str(payload.get("message", "unknown Twelve Data error")))
-    values = payload.get("values") or []
-    if not isinstance(values, list):
-        return None
-    rows = []
-    for item in values:
-        try:
-            timestamp = item.get("datetime")
-            if isinstance(timestamp, str):
-                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                timestamp = int(dt.timestamp())
-            else:
-                timestamp = int(float(timestamp))
-            op = float(item["open"]); hi = float(item["high"]); lo = float(item["low"]); cl = float(item["close"])
-            vol = float(item.get("volume") or item.get("tick_volume") or 0.0)
-            if not all(math.isfinite(x) for x in (op, hi, lo, cl, vol)):
-                continue
-            if hi < max(op, cl) or lo > min(op, cl) or hi < lo:
-                continue
-            rows.append((timestamp, op, hi, lo, cl, vol))
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
-    rows.sort(key=lambda row: row[0])
-    if rows and rows[-1][0] + _interval_seconds(interval) > int(time.time()):
-        rows.pop()
-    rows = rows[-int(limit):] if limit else rows
-    if len(rows) < 5:
-        return None
-    return {
-        "timestamps": [r[0] for r in rows], "opens": [r[1] for r in rows],
-        "highs": [r[2] for r in rows], "lows": [r[3] for r in rows],
-        "closes": [r[4] for r in rows], "volumes": [r[5] for r in rows],
-        "source": "Twelve Data", "source_symbol": symbol,
-        "is_research_data": True, "data_quality": "research", "provider_status": "ok",
-    }
-
-
-def _get_forex_from_twelve_data(normalized, api_symbol, interval, limit):
-    if not FOREX_ALLOW_TWELVE_FALLBACK:
-        return None
-    api_key = os.getenv("TWELVE_DATA_API_KEY", "").strip()
-    if not api_key:
-        return None
-    cache_key = (normalized, interval, limit)
-    now = time.monotonic()
-    with TWELVE_DATA_CACHE_LOCK:
-        cached = TWELVE_DATA_CACHE.get(cache_key)
-        if cached and now - cached["stored_at"] < TWELVE_DATA_CACHE_TTL:
-            return cached["data"]
-    params = {
-        "symbol": api_symbol, "interval": {"Min1":"1min","Min5":"5min","Min15":"15min","Hour1":"1h","Hour4":"4h","Day1":"1day"}.get(interval, "15min"),
-        "outputsize": limit, "apikey": api_key, "timezone": "UTC", "format": "JSON",
-    }
-    try:
-        _wait_for_twelve_data_slot()
-        response = requests.get(TWELVE_DATA_BASE_URL, params=params,
-                                headers={"Accept":"application/json","User-Agent":"TonaPrometheus-Forex/15"}, timeout=15)
-        if response.status_code == 429:
-            logger.warning(f"[ForexData] Twelve Data fallback rate-limited: {api_symbol}/{interval}")
-            return None
-        response.raise_for_status()
-        data = _parse_twelve_data_payload(response.json(), normalized, interval, limit)
-        if data:
-            with TWELVE_DATA_CACHE_LOCK:
-                TWELVE_DATA_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
-        return data
-    except Exception as exc:
-        logger.warning(f"[ForexData] Twelve Data fallback failed: {api_symbol}/{interval} reason={exc}")
-        return None
-
-
 def get_forex_candles(symbol, interval="Min15", limit=1000):
-    """Fetch closed Forex candles from BingX TradFi.
+    """Fetch closed Forex research candles from MEXC public Futures API.
 
-    BingX is the primary provider for EUR/USD and USD/JPY. This function is
-    read-only and is used by the existing scanner/analysis layers; it does not
-    alter SuperTrend/VPT or its 60-second schedule.
+    This function is passive: it performs one network request only when its
+    cache is stale and never calls another market-data provider automatically.
+    It does not alter the SuperTrend/VPT logic or the 60-second scanner loop.
     """
-    normalized, api_symbol, bingx_symbol = _normalize_forex_symbol(symbol)
+    normalized, mexc_symbol, mode = _normalize_forex_symbol(symbol)
     interval = str(interval)
     limit = max(5, min(int(limit), 1000))
     cache_key = (normalized, interval, limit)
     now = time.monotonic()
 
-    with BINGX_FOREX_CACHE_LOCK:
-        cached = BINGX_FOREX_CACHE.get(cache_key)
-        if cached and now - cached["stored_at"] < BINGX_FOREX_CACHE_TTL:
+    with MEXC_FOREX_CACHE_LOCK:
+        cached = MEXC_FOREX_CACHE.get(cache_key)
+        if cached and now - cached["stored_at"] < MEXC_FOREX_CACHE_TTL:
             return cached["data"]
 
-    params = {"symbol": bingx_symbol, "interval": _bingx_interval(interval), "limit": limit}
+    interval_name = _mexc_interval(interval)
+    interval_sec = _interval_seconds(interval)
+    end_ts = int(time.time())
+    start_ts = max(0, end_ts - interval_sec * (limit + 5))
+    params = {
+        "interval": interval_name,
+        "start": start_ts,
+        "end": end_ts,
+    }
+    url = f"{MEXC_FOREX_BASE_URL}{MEXC_FOREX_KLINES_PATH}/{mexc_symbol}"
+
     try:
         response = requests.get(
-            BINGX_FOREX_BASE_URL + BINGX_FOREX_KLINES_PATH,
+            url,
             params=params,
-            headers={"Accept":"application/json", "User-Agent":"TonaPrometheus-Forex/15"},
+            headers={"Accept": "application/json", "User-Agent": "TonaPrometheus-Forex/16"},
             timeout=15,
         )
         response.raise_for_status()
-        data, reason = _parse_bingx_klines(response.json(), normalized, interval, limit)
+        data, reason = _parse_mexc_klines(response.json(), normalized, interval, limit, mode)
         if data:
-            with BINGX_FOREX_CACHE_LOCK:
-                BINGX_FOREX_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
-            logger.debug(f"[ForexData] BingX OK: {bingx_symbol}/{_bingx_interval(interval)} candles={len(data['closes'])}")
+            with MEXC_FOREX_CACHE_LOCK:
+                MEXC_FOREX_CACHE[cache_key] = {"stored_at": time.monotonic(), "data": data}
+            logger.debug(
+                f"[ForexData] MEXC OK: {normalized}/{interval_name} "
+                f"provider_symbol={mexc_symbol} candles={len(data['closes'])}"
+            )
             return data
-        logger.warning(f"[ForexData] BingX failed: {bingx_symbol}/{_bingx_interval(interval)} reason={reason}")
+        logger.warning(
+            f"[ForexData] MEXC failed: {normalized}/{interval_name} "
+            f"provider_symbol={mexc_symbol} reason={reason}"
+        )
     except Exception as exc:
-        logger.warning(f"[ForexData] BingX request failed: {bingx_symbol}/{_bingx_interval(interval)} reason={exc}")
-
-    # Explicit opt-in only: do not automatically hammer Twelve Data after a BingX failure.
-    fallback = _get_forex_from_twelve_data(normalized, api_symbol, interval, limit)
-    if fallback:
-        logger.info(f"[ForexData] Using explicit Twelve Data fallback: {api_symbol}/{interval}")
-        return fallback
+        logger.warning(
+            f"[ForexData] MEXC request failed: {normalized}/{interval_name} "
+            f"provider_symbol={mexc_symbol} reason={exc}"
+        )
     return None
 
 
