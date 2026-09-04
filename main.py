@@ -8753,7 +8753,24 @@ def _analyze_and_send_internal(asset_type, is_manual=False, chat_id=None):
             mom_status = "غير متوفر"
         lines.append(f"   • قوة الزخم: {mom_status}")
 
-        lines.append(f"   • توافق الفريمات: {'ممتاز' if bullish_count >= 3 or bearish_count >= 3 else 'متوسط' if bullish_count >= 2 or bearish_count >= 2 else 'ضعيف'}")
+        # توافق الفريمات يجب أن يقيس توافقها مع اتجاه الإشارة نفسها.
+        # أغلبية هابطة لا تعني "ممتاز" عندما تكون الإشارة BUY.
+        if signal == "BUY":
+            directional_count = bullish_count
+        elif signal == "SELL":
+            directional_count = bearish_count
+        else:
+            directional_count = max(bullish_count, bearish_count)
+
+        if directional_count == len(CANONICAL_ANALYSIS_TIMEFRAMES):
+            tf_status = "ممتاز"
+        elif directional_count >= 3:
+            tf_status = "جيد"
+        elif directional_count >= 2:
+            tf_status = "متوسط"
+        else:
+            tf_status = "ضعيف"
+        lines.append(f"   • توافق الفريمات: {tf_status} ({directional_count}/{len(CANONICAL_ANALYSIS_TIMEFRAMES)} تدعم الإشارة)")
 
         memory_insights = analysis.get("memory_insights", {})
         if memory_insights and memory_insights.get("has_memory"):
@@ -12044,9 +12061,9 @@ def generate_prior_judgment(analysis: Dict, asset_type: str, trade_type: str = "
         reasoning_parts.append(f"VPT يدعم الاتجاه ({vpt:.2f})")
 
     if trade_type == "BUY" and current_trend == "هابط":
-        reasoning_parts.append("⚠️ تناقض: الاتجاه العام هابط مع إشارة شراء")
+        reasoning_parts.append("⚠️ تناقض: اتجاه فريم التداول 5m هابط مع إشارة شراء")
     elif trade_type == "SELL" and current_trend == "صاعد":
-        reasoning_parts.append("⚠️ تناقض: الاتجاه العام صاعد مع إشارة بيع")
+        reasoning_parts.append("⚠️ تناقض: اتجاه فريم التداول 5m صاعد مع إشارة بيع")
 
     if trade_type == "BUY" and bearish_count >= 3:
         reasoning_parts.append(f"⚠️ {bearish_count}/{len(CANONICAL_ANALYSIS_TIMEFRAMES)} فريمات هابطة ضد الشراء")
@@ -12109,10 +12126,47 @@ def generate_prior_judgment(analysis: Dict, asset_type: str, trade_type: str = "
 
     # التوقع الحالي يجب أن يكون ثنائياً دائماً: نجاح أو فشل. لا نستخدم verdict=uncertain.
     final_score = max(0.0, min(100.0, float(final_score)))
+
+    # 🛡️ حارس التناقض الاتجاهي — استشاري فقط.
+    # لا يغيّر إشارة SuperTrend/VPT ولا يمنع فتح الصفقة.
+    # وظيفته منع التوقع المسبق من اعتبار BUY/SELL ناجحاً عندما تكون
+    # الفريمات الأربعة في الاتجاه المعاكس للإشارة.
+    if total_frames >= 3:
+        if trade_type == "BUY":
+            opposing_frames = bearish_count
+            supporting_frames = bullish_count
+        else:
+            opposing_frames = bullish_count
+            supporting_frames = bearish_count
+    else:
+        opposing_frames = 0
+        supporting_frames = 0
+
+    severe_frame_conflict = (
+        total_frames >= 4 and opposing_frames >= 3 and supporting_frames <= 1
+    )
+    current_trend_conflict = (
+        (trade_type == "BUY" and current_trend == "هابط") or
+        (trade_type == "SELL" and current_trend == "صاعد")
+    )
+    severe_directional_conflict = severe_frame_conflict or (
+        current_trend_conflict and opposing_frames >= 3
+    )
+
     confidence_base = adaptive_confidence if adaptive_probability is not None else abs(final_score - 50.0) * 2.0
     evidence_bonus = min(20.0, adaptive_effective_sample * 0.8) if adaptive_probability is not None else min(15.0, historical_sample * 0.25)
     confidence = max(25.0, min(95.0, 40.0 + 0.45 * confidence_base + evidence_bonus))
-    verdict = 'win' if final_score >= 50.0 else 'loss'
+
+    if severe_directional_conflict:
+        confidence = min(confidence, 35.0)
+        final_score = min(final_score, 35.0)
+        verdict = 'loss'
+        reasons.append(
+            f"🚨 تعارض اتجاهي شديد: {opposing_frames}/{total_frames} فريمات "
+            f"تعاكس {trade_type} — المؤشرات اللحظية لا تكفي لتوقع الربح"
+        )
+    else:
+        verdict = 'win' if final_score >= 50.0 else 'loss'
 
     reasons.append(f"🧠 التوقع المركب: فني {technical_score:.0f}% + تعلم {adaptive_probability:.0f}%" if adaptive_probability is not None else f"🧠 التوقع الفني {technical_score:.0f}%")
     if historical_probability is not None and historical_sample >= 5:
@@ -12165,6 +12219,9 @@ def generate_prior_judgment(analysis: Dict, asset_type: str, trade_type: str = "
             'adaptive_similar_win_rate': adaptive_map.get('similar_win_rate') if adaptive_map else None,
             'adaptive_global_win_rate': adaptive_map.get('global_win_rate') if adaptive_map else None,
             'adaptive_calibration_factor': adaptive_map.get('calibration_factor') if adaptive_map else 1.0,
+            'supporting_frames': supporting_frames,
+            'opposing_frames': opposing_frames,
+            'severe_directional_conflict': severe_directional_conflict,
             'prediction_calibration_factor': prediction_calibration_factor,
             'prediction_learning_sample_count': prediction_learning_state.get('sample_count', 0),
             'prediction_learning_accuracy': prediction_learning_state.get('accuracy'),
