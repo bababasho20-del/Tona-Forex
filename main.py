@@ -3481,7 +3481,7 @@ BINGX_FOREX_CACHE = {}
 BINGX_FOREX_CACHE_LOCK = threading.RLock()
 BINGX_FOREX_CACHE_TTL = int(os.getenv("BINGX_FOREX_CACHE_TTL", "45"))
 BINGX_FOREX_BASE_URL = "https://open-api.bingx.com"
-BINGX_FOREX_KLINES_PATH = "/openApi/swap/v2/quote/klines"
+BINGX_FOREX_KLINES_PATH = "/openApi/swap/v3/quote/klines"
 
 # Twelve Data remains an explicit emergency fallback only; it is disabled by default.
 TWELVE_DATA_CACHE = {}
@@ -3497,8 +3497,8 @@ FOREX_ALLOW_TWELVE_FALLBACK = os.getenv("FOREX_ALLOW_TWELVE_FALLBACK", "false").
 def _normalize_forex_symbol(symbol):
     normalized = str(symbol or "").upper().replace("/", "").replace("_", "").replace("-", "")
     mapping = {
-        "EURUSD": ("EUR/USD", "EURUSD-USDT"),
-        "USDJPY": ("USD/JPY", "USDJPY-USDT"),  # BingX Forex perpetual symbols are USDT-margined.
+        "EURUSD": ("EUR/USD", "EUR-USD"),
+        "USDJPY": ("USD/JPY", "USD-JPY"),
     }
     if normalized not in mapping:
         raise ValueError(f"Unsupported Forex instrument: {symbol}")
