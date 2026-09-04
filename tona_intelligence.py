@@ -1,1298 +1,839 @@
 """
-🧠 Tona Elite Intelligence Engine - V5.5 (النسخة النهائية المستقرة)
-محرك الاستخبارات - جلب وتحليل الأخبار وتأثيرها على النفط والفضة مع ربط زمني دقيق
+Tona Elite Intelligence Engine - Forex Edition
+مخصص حصرياً لـ EUR/USD و USD/JPY.
 
-✅ التحسينات الجذورية في V5.5:
-- إصلاح فقدان الذاكرة النشطة (جعـل _active_news متغيراً على مستوى الوحدة)
-- تقليل طلبات MEXC API عبر جلب الشموع مرة واحدة لكل دورة تحليل
-- حل مشكلة الاستيراد الدائري عبر حقن التبعية (candle_fetcher)
-- جعل التقرير يعتمد على الأرقام الفعلية من الشارت بدلاً من تفسيرات Groq النصية
-- إضافة فحص صارم لحداثة الأخبار (تجاهل الأخبار الأقدم من ساعتين قبل التحليل)
-- ✅ إصلاح خطأ تواريخ Python: can't subtract offset-naive and offset-aware datetimes
-- ✅ إزالة الجداول والرموز الغريبة من التقرير، واستخدام نصوص واضحة ومباشرة
-- ✅ تحسين صياغة التقرير ليكون مفيداً وقابلاً للقراءة
-- إزالة التحليل النصي للأخبار الذي يسبب تفسيرات وهمية
-- عرض التأثير الفعلي فقط (التغير المئوي خلال 15 و 60 دقيقة)
-- تحسين إدارة الذاكرة المؤقتة مع تنظيف تلقائي
-- إضافة دالة get_engine() لاستخدام مثيل واحد فقط من المحرك
-- حماية كاملة من None وقيم فارغة مع سجلات تشخيصية مفصلة
+المبدأ:
+- الأخبار الاقتصادية/الجيوسياسية ذات الصلة بالزوجين فقط.
+- قياس حركة السعر الفعلية بعد الخبر، وعدم اختلاق السببية.
+- لا يغيّر استراتيجية SuperTrend/VPT ولا يدخل في قرار الإشارة.
+- يستخدم candle_fetcher المحقون من main.py، وبالتالي لا ينشئ مزود سوق مستقل.
+- Breaking News Radar يعمل بدورة مستقلة (يحددها main.py، افتراضياً 30 دقيقة).
 """
 
 import os
 import time
 import json
-import requests
-import logging
-import hashlib
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Tuple
-import xml.etree.ElementTree as ET
+import hashlib
+import logging
+import threading
 import traceback
-import threading
-import threading
-
-# =====================================================================
-# ⚙️ الإعدادات الأساسية
-# =====================================================================
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Any
+from urllib.parse import quote_plus
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
-# =====================================================================
-# 🗂️ ذاكرة الترجمة المؤقتة
-# =====================================================================
-
-TRANSLATION_CACHE = {}
-CACHE_TTL = 3600
-
-# عتبات التأثير: نفصل بين أهمية الخبر وبين الحركة السعرية المقاسة.
-IMPACT_THRESHOLDS = {
-    "low": 0.15,
-    "medium": 0.30,
-    "high": 0.50,
-    "very_high": 1.00,
-}
 NEWS_LOOKBACK_HOURS = 6
-MIN_SOURCE_CONSENSUS = 2
+IMPACT_THRESHOLDS = {
+    "low": 0.05,
+    "medium": 0.15,
+    "high": 0.30,
+    "very_high": 0.60,
+}
 
-# =====================================================================
-# 📦 الذاكرة العامة للأخبار المؤثرة (مشتركة بين جميع المثيلات)
-# =====================================================================
-_GLOBAL_ACTIVE_NEWS = []  # ✅ متغير على مستوى الوحدة لمنع فقدان البيانات
+FOREX_ASSETS = ("eurusd", "usdjpy")
+FOREX_LABELS = {
+    "eurusd": "EUR/USD",
+    "usdjpy": "USD/JPY",
+}
+FOREX_SYMBOLS = {
+    "eurusd": "eurusd",
+    "usdjpy": "usdjpy",
+}
 
-# =====================================================================
-# 🏭 مثيل واحد من المحرك (Singleton)
-# =====================================================================
+_GLOBAL_ACTIVE_NEWS: List[Dict] = []
 _ENGINE_INSTANCE = None
 
 
 class TonaEliteEngine:
-    def __init__(self, memory=None, market_analyzer=None, groq_api_key=None, news_api_key=None, candle_fetcher=None):
+    def __init__(self, memory=None, market_analyzer=None, groq_api_key=None,
+                 news_api_key=None, candle_fetcher=None):
         self.memory = memory
         self.market_analyzer = market_analyzer
         self.groq_api_key = groq_api_key or GROQ_API_KEY
         self.news_api_key = news_api_key or NEWS_API_KEY
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-
-        # ✅ ربط الذاكرة العامة (بدلاً من إنشاء قائمة جديدة)
-        self._active_news = _GLOBAL_ACTIVE_NEWS
-
-        # ✅ تخزين دالة جلب الشموع (حقن التبعية لحل الاستيراد الدائري)
         self.candle_fetcher = candle_fetcher
+        self._active_news = _GLOBAL_ACTIVE_NEWS
         self._radar_alert_history = {}
         self._radar_alert_times = []
         self._radar_lock = threading.Lock()
-        self._last_fetch_stats = {"sources_total":0,"sources_ok":0,"sources_failed":0,"raw_items":0,"filtered_items":0,"unique_items":0,"errors":[]}
-        self._last_report_status = {"provider":"none","reason":"not_run"}
-        self._last_candles_data = {}
-        self._last_candles_data = {}
+        self._radar_thread = None
+        self._radar_stop = threading.Event()
+        self._last_fetch_stats = {
+            "sources_total": 0, "sources_ok": 0, "sources_failed": 0,
+            "raw_items": 0, "filtered_items": 0, "unique_items": 0, "errors": []
+        }
+        self._last_report_status = {"provider": "none", "reason": "not_run"}
 
         self.trusted_sources = [
             "Reuters", "Bloomberg", "CNBC", "Financial Times", "Wall Street Journal",
-            "The Economist", "Forbes", "Business Insider", "MarketWatch",
-            "Oil Price", "Energy Voice", "Platts", "Argus Media",
-            "FT", "WSJ", "BBC", "CNN", "Al Jazeera", "Sky News",
-            "الجزيرة", "العربية", "سكاي نيوز عربية", "واس", "وام"
+            "The Economist", "MarketWatch", "BBC", "CNN", "Al Jazeera", "Sky News",
+            "الجزيرة", "العربية", "سكاي نيوز عربية", "ECB", "European Central Bank",
+            "Federal Reserve", "Fed", "Bank of Japan", "BoJ", "日本銀行", "MOF Japan"
         ]
-
         self.exclude_keywords = [
-            "sport", "football", "cricket", "tennis", "basketball",
-            "entertainment", "celebrity", "movie", "music", "concert",
-            "hollywood", "oscar", "wedding", "gift", "party", "birthday",
-            "royal", "king", "queen", "prince", "princess",
-            "fashion", "style", "beauty", "makeup"
+            "sport", "football", "cricket", "tennis", "basketball", "entertainment",
+            "celebrity", "movie", "music", "concert", "hollywood", "fashion", "beauty",
+            "makeup", "wedding", "birthday", "recipe", "gaming"
         ]
 
-        self.required_keywords = [
-            "oil", "crude", "petroleum", "brent", "wti", "opec",
-            "silver", "gold", "precious metals", "xag", "xau",
-            "inflation", "federal reserve", "fed", "interest rate",
-            "dollar", "usd", "economy", "recession", "growth",
-            "geopolitical", "war", "conflict", "crisis", "tension",
-            "sanctions", "embargo", "houthi", "red sea", "suez",
-            "hormuz", "strait", "middle east", "iran", "russia",
-            "ukraine", "israel", "gaza", "yemen", "arabia",
-            "نفط", "بترول", "خام", "برنت", "أوبك",
-            "فضة", "ذهب", "معادن ثمينة",
-            "جيوسياسي", "حرب", "صراع", "أزمة", "توتر",
-            "ترمب", "بايدن", "البيت الأبيض", "الكونغرس",
-            "أوكرانيا", "روسيا", "إيران", "إسرائيل", "غزة", "الحوثي"
-        ]
+        logging.info("✅ Tona Elite Intelligence Engine — Forex Edition initialized (EUR/USD + USD/JPY)")
 
-        logging.info("✅ Tona Elite Intelligence Engine V5.5 initialized (تقرير نظيف وقابل للقراءة)")
-
-    # =====================================================================
-    # 📰 جلب الأخبار
-    # =====================================================================
-
-    def _fetch_rss_feed(self, feed_url, max_items=8):
+    # ------------------------------------------------------------------
+    # RSS / News collection
+    # ------------------------------------------------------------------
+    def _fetch_rss_feed(self, feed_url, max_items=10):
         try:
-            response = requests.get(feed_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if response.status_code == 200:
-                root = ET.fromstring(response.content)
-                items = []
-                for item in root.findall('.//item')[:max_items]:
-                    title = item.find('title')
-                    desc = item.find('description')
-                    pub_date = item.find('pubDate')
-                    link = item.find('link')
-                    if title is not None and title.text:
-                        items.append({
-                            "title": str(title.text) if title.text is not None else "",
-                            "description": str(desc.text) if desc is not None and desc.text is not None else "",
-                            "url": str(link.text) if link is not None and link.text is not None else "",
-                            "source": feed_url.split('/')[2],
-                            "published_at": str(pub_date.text) if pub_date is not None and pub_date.text is not None else datetime.now().isoformat(),
-                            "is_trusted": True
-                        })
-                return items
-            return []
-        except Exception as e:
-            logging.debug(f"RSS error {feed_url}: {e}")
+            response = requests.get(
+                feed_url, timeout=10,
+                headers={"User-Agent": "Mozilla/5.0 Tona-Forex-Intelligence/1.0"}
+            )
+            if response.status_code != 200:
+                return []
+            root = ET.fromstring(response.content)
+            items = []
+            for item in root.findall('.//item')[:max_items]:
+                title = item.find('title')
+                desc = item.find('description')
+                pub_date = item.find('pubDate')
+                link = item.find('link')
+                if title is not None and title.text:
+                    items.append({
+                        "title": self._safe_str(title.text),
+                        "description": self._safe_str(desc.text if desc is not None else ""),
+                        "url": self._safe_str(link.text if link is not None else ""),
+                        "source": feed_url.split('/')[2],
+                        "published_at": self._safe_str(pub_date.text if pub_date is not None else "") or datetime.now(timezone.utc).isoformat(),
+                        "is_trusted": True,
+                    })
+            return items
+        except Exception as exc:
+            logging.debug(f"Tona Forex RSS error {feed_url}: {exc}")
             return []
 
-    def fetch_targeted_intelligence(self, hours=10):
-        all_news = []
-
-        rss_feeds = [
-            # مصادر إنجليزية
-            "https://feeds.reuters.com/reuters/commoditiesNews",
-            "https://feeds.reuters.com/reuters/businessNews",
+    def _forex_rss_feeds(self):
+        queries = [
+            "EUR USD euro ECB Fed interest rates inflation CPI PMI",
+            "USD JPY yen Bank of Japan BoJ Ueda intervention Japan inflation wages",
+            "Federal Reserve Fed dollar Treasury yields inflation jobs GDP EUR USD JPY",
+            "ECB euro interest rates Lagarde eurozone inflation GDP PMI EUR USD",
+            "US dollar yen safe haven risk aversion geopolitical USD JPY",
+        ]
+        return [
             "https://feeds.bbci.co.uk/news/business/rss.xml",
             "https://feeds.bbci.co.uk/news/world/rss.xml",
-            "https://www.ft.com/commodities?format=rss",
-            "https://oilprice.com/rss/energy-news",
-            "https://oilprice.com/rss/geopolitics",
-            "https://www.marketwatch.com/rss/commodities",
-            "https://www.bloomberg.com/feed/commodities",
+            "https://feeds.skynews.com/feeds/rss/business.xml",
+            "https://feeds.skynews.com/feeds/rss/world.xml",
             "https://www.aljazeera.com/xml/rss/all.xml",
             "https://www.dw.com/en/english-news/rss",
-            "https://feeds.skynews.com/feeds/rss/world.xml",
-            # مصادر عربية
-            "https://www.aljazeera.net/feeds/rss",
-            "https://www.alarabiya.net/feed/rss",
-            "https://www.skynewsarabia.com/rss",
-            "https://www.saudigazette.com.sa/rss/feed",
-            "https://www.wam.ae/ar/feed"
+        ] + [
+            "https://news.google.com/rss/search?q=" + quote_plus(q) + "&hl=en-US&gl=US&ceid=US:en"
+            for q in queries
         ]
 
-        for feed_url in rss_feeds:
-            items = self._fetch_rss_feed(feed_url)
-            for item in items:
-                if not item:
-                    continue
-                text = (str(item.get("title", "")) + " " + str(item.get("description", ""))).lower()
-                if any(k in text for k in self.exclude_keywords):
-                    continue
-                if any(k in text for k in self.required_keywords):
-                    all_news.append(item)
+    def fetch_targeted_intelligence(self, hours=NEWS_LOOKBACK_HOURS):
+        """جمع أخبار اقتصادية/جيوسياسية تخص EUR/USD أو USD/JPY فقط."""
+        all_news = []
+        stats = {"sources_total": 0, "sources_ok": 0, "sources_failed": 0,
+                 "raw_items": 0, "filtered_items": 0, "unique_items": 0, "errors": []}
 
-        if self.news_api_key and self.news_api_key != "":
+        feeds = self._forex_rss_feeds()
+        stats["sources_total"] = len(feeds)
+        for feed_url in feeds:
+            try:
+                items = self._fetch_rss_feed(feed_url)
+                if items:
+                    stats["sources_ok"] += 1
+                    stats["raw_items"] += len(items)
+                else:
+                    stats["sources_failed"] += 1
+                for item in items:
+                    text = (self._safe_str(item.get("title")) + " " + self._safe_str(item.get("description"))).lower()
+                    if any(k in text for k in self.exclude_keywords):
+                        continue
+                    if self._is_target_news(item):
+                        item["collection_method"] = "rss"
+                        item["target_assets"] = self._news_target_assets(item)
+                        all_news.append(item)
+                        stats["filtered_items"] += 1
+            except Exception as exc:
+                stats["sources_failed"] += 1
+                stats["errors"].append(f"RSS:{type(exc).__name__}")
+
+        if self.news_api_key:
             queries = [
-                ("oil OR crude OR petroleum OR OPEC", "oil"),
-                ("silver OR XAG OR gold", "silver"),
-                ("Middle East OR Iran OR Israel OR Gaza OR Houthi", "geopolitical"),
-                ("Federal Reserve OR inflation OR interest rate", "economic"),
-                ("Russia OR Ukraine OR sanctions", "geopolitical")
+                "EUR USD ECB eurozone inflation interest rates PMI GDP",
+                "USD JPY Bank of Japan yen Ueda intervention Japan inflation wages",
+                "Federal Reserve dollar inflation interest rates jobs Treasury yields",
+                "euro ECB Fed EUR USD",
+                "yen BoJ Fed USD JPY",
             ]
-            for query, _ in queries:
+            stats["sources_total"] += len(queries)
+            from_date = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            for query in queries:
                 try:
-                    from_date = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
-                    url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&sortBy=relevance&language=en&apiKey={self.news_api_key}&pageSize=10"
+                    url = (
+                        "https://newsapi.org/v2/everything?"
+                        f"q={quote_plus(query)}&from={from_date}&sortBy=publishedAt&language=en"
+                        f"&apiKey={self.news_api_key}&pageSize=15"
+                    )
                     response = requests.get(url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        for article in data.get("articles", []):
-                            if not article:
-                                continue
-                            title = str(article.get("title")) if article.get("title") is not None else ""
-                            description = str(article.get("description")) if article.get("description") is not None else ""
-                            text = (title + " " + description).lower()
-                            if any(k in text for k in self.exclude_keywords):
-                                continue
-                            if any(k in text for k in self.required_keywords):
-                                all_news.append({
-                                    "title": title,
-                                    "description": description,
-                                    "url": str(article.get("url")) if article.get("url") is not None else "",
-                                    "source": str(article.get("source", {}).get("name")) if article.get("source", {}).get("name") is not None else "NewsAPI",
-                                    "published_at": str(article.get("publishedAt")) if article.get("publishedAt") is not None else datetime.now().isoformat(),
-                                    "is_trusted": True
-                                })
-                except Exception as e:
-                    logging.debug(f"NewsAPI error: {e}")
+                    if response.status_code != 200:
+                        stats["sources_failed"] += 1
+                        stats["errors"].append(f"NewsAPI:{response.status_code}")
+                        continue
+                    stats["sources_ok"] += 1
+                    articles = (response.json() or {}).get("articles", []) or []
+                    stats["raw_items"] += len(articles)
+                    for article in articles:
+                        candidate = {
+                            "title": self._safe_str(article.get("title")),
+                            "description": self._safe_str(article.get("description")),
+                            "url": self._safe_str(article.get("url")),
+                            "source": self._safe_str((article.get("source") or {}).get("name")) or "NewsAPI",
+                            "published_at": self._safe_str(article.get("publishedAt")) or datetime.now(timezone.utc).isoformat(),
+                            "is_trusted": True,
+                            "collection_method": "newsapi",
+                        }
+                        text = (candidate["title"] + " " + candidate["description"]).lower()
+                        if not candidate["title"] or any(k in text for k in self.exclude_keywords):
+                            continue
+                        if self._is_target_news(candidate):
+                            candidate["target_assets"] = self._news_target_assets(candidate)
+                            all_news.append(candidate)
+                            stats["filtered_items"] += 1
+                except Exception as exc:
+                    stats["sources_failed"] += 1
+                    stats["errors"].append(f"NewsAPI:{type(exc).__name__}")
+        else:
+            logging.debug("Tona Forex: NEWS_API_KEY غير موجود؛ الاعتماد على RSS")
 
-        # إزالة التكرارات
         seen = set()
         unique = []
         for news in all_news:
-            if not news:
-                continue
-            key = str(news.get("title", ""))[:50] or str(hashlib.md5(str(news).encode()).hexdigest())[:10]
+            title = re.sub(r"\s+", " ", self._safe_str(news.get("title"))).strip().lower()
+            key = hashlib.sha256(title.encode("utf-8")).hexdigest() if title else hashlib.sha256(self._safe_str(news).encode("utf-8")).hexdigest()
             if key not in seen:
                 seen.add(key)
                 unique.append(news)
 
-        logging.info(f"📰 تم جلب {len(unique)} خبراً فريداً")
-        return unique[:40]
+        stats["unique_items"] = len(unique)
+        self._last_fetch_stats = stats
+        logging.info(
+            f"📰 Tona Forex sources: {stats['sources_ok']}/{stats['sources_total']} OK | "
+            f"raw={stats['raw_items']} | relevant={stats['filtered_items']} | unique={stats['unique_items']}"
+        )
+        if stats["errors"]:
+            logging.warning(f"⚠️ Tona Forex news source errors: {stats['errors'][:5]}")
+        return unique[:80]
 
-    # =====================================================================
-    # 📊 ربط الأخبار بالشارت (محسّن بنقاط زمنية متعددة واستخدام كاش)
-    # =====================================================================
+    # ------------------------------------------------------------------
+    # Asset targeting: strict Forex logic
+    # ------------------------------------------------------------------
+    def _news_target_assets(self, news_item: Dict) -> List[str]:
+        text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
 
-    def _get_price_at_time(self, asset_type: str, minutes_ago: int = 5, candles_data: Dict = None) -> Optional[float]:
-        """
-        الحصول على سعر الأصل عند نقطة زمنية محددة.
-        - إذا تم تمرير candles_data، نستخدمه مباشرة (لا طلب API).
-        - وإلا نستخدم candle_fetcher إن وُجد.
-        - وإلا نستخدم الاستيراد المحلي كحل أخير مع تحذير.
-        """
-        # ✅ 1. استخدام البيانات المخزنة مسبقاً (الأفضل)
-        if candles_data and asset_type in candles_data:
-            data = candles_data[asset_type]
-            if data and data.get("closes") and len(data["closes"]) >= abs(minutes_ago) + 1:
-                if minutes_ago >= 0:
-                    idx = min(minutes_ago, len(data["closes"]) - 1)
-                    return data["closes"][-idx - 1] if idx < len(data["closes"]) else data["closes"][-1]
-                return data["closes"][-1]
-            return None
+        euro_direct = [
+            "eur/usd", "eurusd", "euro dollar", "euro-dollar", "euro",
+            "ecb", "european central bank", "eurozone", "euro area",
+            "lagarde", "germany inflation", "german inflation", "eurozone inflation",
+            "eurozone pmi", "eurozone gdp", "eurozone jobs", "eurozone unemployment",
+            "اليورو", "البنك المركزي الأوروبي", "منطقة اليورو", "التضخم الأوروبي"
+        ]
+        yen_direct = [
+            "usd/jpy", "usdjpy", "dollar yen", "dollar-yen", "yen",
+            "jpy", "boj", "bank of japan", "bank of japan governor", "ueda",
+            "japan inflation", "japan cpi", "japan wages", "japan gdp", "japan pmi",
+            "japan unemployment", "fx intervention", "currency intervention", "mof japan",
+            "الين", "بنك اليابان", "اليابان", "تدخل العملة"
+        ]
+        usd_macro = [
+            "us dollar", "usd", "dollar", "federal reserve", "fed", "powell",
+            "us interest rate", "u.s. interest rate", "rate cut", "rate hike",
+            "us inflation", "us cpi", "core cpi", "pce", "nonfarm payroll", "nfp",
+            "payrolls", "us jobs", "unemployment rate", "us gdp", "us pmi",
+            "treasury yield", "us yields", "bond yields", "العائد الأمريكي", "الفيدرالي",
+            "الدولار", "الوظائف الأمريكية", "التضخم الأمريكي"
+        ]
+        risk_euro = [
+            "european risk", "europe sanctions", "european energy", "european recession",
+            "european political crisis", "eurozone political", "euro area crisis"
+        ]
+        risk_yen = [
+            "risk aversion", "safe haven yen", "flight to safety", "market turmoil",
+            "geopolitical escalation", "geopolitical risk", "war", "conflict", "crisis",
+            "التوتر الجيوسياسي", "العزوف عن المخاطرة", "ملاذ آمن", "حرب", "أزمة"
+        ]
 
-        # ✅ 2. استخدام دالة الجلب المحقونة (حقن التبعية)
-        if self.candle_fetcher:
-            try:
-                return self.candle_fetcher(asset_type, minutes_ago)
-            except Exception as e:
-                logging.debug(f"⚠️ فشل candle_fetcher: {e}")
+        eur = any(k in text for k in euro_direct) or any(k in text for k in risk_euro)
+        jpy = any(k in text for k in yen_direct)
 
-        # ✅ 3. الحل الاحتياطي النهائي (مع تحذير لتجنب الاستيراد الدائري)
-        try:
-            from main import get_forex_candles as get_mexc_candles
-            symbol = "USOIL_USDT" if asset_type == "oil" else "SILVER_USDT"
-            limit = abs(minutes_ago) + 5
-            if limit > 500:
-                limit = 500
-            data = get_mexc_candles(symbol, "Min1", limit)
-            if data and data.get("closes") and len(data["closes"]) >= abs(minutes_ago) + 1:
-                if minutes_ago >= 0:
-                    idx = min(minutes_ago, len(data["closes"]) - 1)
-                    return data["closes"][-idx - 1] if idx < len(data["closes"]) else data["closes"][-1]
-                return data["closes"][-1]
-        except Exception as e:
-            logging.debug(f"⚠️ فشل جلب السعر (حل احتياطي): {e}")
-        return None
+        # أخبار الدولار/الفيدرالي تؤثر على جانبي الزوجين، لذلك تُربط بهما معاً.
+        usd = any(k in text for k in usd_macro)
+        if usd:
+            eur = True
+            jpy = True
 
-    def _parse_published_time(self, published_at: str) -> Optional[datetime]:
-        """تحويل النص الزمني إلى كائن datetime مع دعم تنسيقات متعددة"""
-        if not published_at:
-            return None
-        try:
-            formats = [
-                "%Y-%m-%dT%H:%M:%SZ",
-                "%Y-%m-%dT%H:%M:%S.%fZ",
-                "%Y-%m-%d %H:%M:%S",
-                "%a, %d %b %Y %H:%M:%S %Z",
-                "%a, %d %b %Y %H:%M:%S %z",
-                "%Y-%m-%dT%H:%M:%S%z"
-            ]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(published_at, fmt)
-                except:
-                    continue
-            match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})', published_at)
-            if match:
-                return datetime.fromisoformat(match.group(1))
-            return None
-        except Exception as e:
-            logging.debug(f"⚠️ فشل تحويل الوقت: {e}")
-            return None
+        # الأخبار الجيوسياسية العامة لا تُربط تلقائياً بالزوجين؛ يجب وجود قناة FX واضحة.
+        if any(k in text for k in risk_yen) and any(k in text for k in ["yen", "jpy", "dollar", "usd", "safe haven", "risk aversion", "الين", "الدولار"]):
+            jpy = True
+        if any(k in text for k in ["europe", "european", "euro", "eur", "eurozone", "اليورو", "أوروبا"]) and any(k in text for k in ["risk", "crisis", "war", "sanctions", "energy", "التوتر", "أزمة", "عقوبات"]):
+            eur = True
 
-    def _ensure_naive(self, dt: datetime) -> datetime:
-        """تحويل datetime إلى naive (بدون منطقة زمنية) لتجنب أخطاء الطرح"""
-        if dt is None:
-            return None
-        if dt.tzinfo is not None:
-            return dt.replace(tzinfo=None)
-        return dt
+        return (["eurusd"] if eur else []) + (["usdjpy"] if jpy else [])
+
+    def _is_target_news(self, news_item: Dict) -> bool:
+        title = self._safe_str(news_item.get("title")).strip()
+        if not title:
+            return False
+        text = (title + " " + self._safe_str(news_item.get("description"))).lower()
+        if any(k in text for k in self.exclude_keywords):
+            return False
+        return bool(self._news_target_assets(news_item))
 
     def _news_asset(self, news_item: Dict) -> str:
-        """تحديد الأصل الأكثر ارتباطاً بالخبر دون افتراض أن كل خبر للنفط."""
-        text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        silver_terms = ["silver", "xag", "precious metal", "فضة", "ذهب", "معادن ثمينة"]
-        oil_terms = ["oil", "crude", "brent", "wti", "opec", "petroleum", "نفط", "خام", "أوبك", "برنت"]
-        geo_terms = ["iran", "hormuz", "strait of hormuz", "houthi", "red sea", "suez", "middle east", "iran", "israel", "gaza", "yemen", "russia", "ukraine", "sanctions", "إيران", "مضيق هرمز", "البحر الأحمر", "غزة", "اليمن"]
-        ss = sum(1 for k in silver_terms if k in text)
-        oo = sum(1 for k in oil_terms if k in text)
-        gg = sum(1 for k in geo_terms if k in text)
-        if ss > oo and ss > 0:
-            return "silver"
-        if oo > 0 or gg > 0:
-            return "oil"
-        return "oil/silver"
+        targets = self._news_target_assets(news_item)
+        return targets[0] if len(targets) == 1 else "eurusd/usdjpy"
 
-
+    # ------------------------------------------------------------------
+    # Event scoring
+    # ------------------------------------------------------------------
     def _news_potential(self, news_item: Dict) -> Dict:
-        """
-        تقدير القوة الأساسية للخبر قبل النظر إلى حركة السعر.
-        هذا ليس دليلاً على التأثير؛ بل طبقة "قابلية تأثير" مستقلة.
-        """
-        title = self._safe_str(news_item.get("title"))
-        desc = self._safe_str(news_item.get("description"))
-        text = f"{title} {desc}".lower()
-
+        text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
         high = [
-            "opec", "opec+", "fed", "federal reserve", "interest rate", "rate cut",
-            "sanctions", "embargo", "hormuz", "strait of hormuz", "war", "attack",
-            "ceasefire", "iran", "israel", "russia", "ukraine", "tariff", "inflation",
-            "central bank", "emergency", "pipeline", "outage", "production cut",
-            "أوبك", "الفيدرالي", "الفائدة", "عقوبات", "حظر", "هرمز", "حرب", "هجوم",
-            "هدنة", "إيران", "إسرائيل", "روسيا", "أوكرانيا", "تضخم", "بنك مركزي",
-            "خط أنابيب", "تعطل", "خفض الإنتاج"
+            "federal reserve", "fed", "powell", "interest rate", "rate cut", "rate hike",
+            "ecb", "european central bank", "lagarde", "bank of japan", "boj", "ueda",
+            "intervention", "currency intervention", "nfp", "nonfarm payroll", "cpi", "pce",
+            "emergency", "surprise", "unexpected", "central bank", "الفيدرالي", "البنك المركزي الأوروبي",
+            "بنك اليابان", "تدخل العملة", "الوظائف الأمريكية", "التضخم"
         ]
         medium = [
-            "inventory", "stockpile", "production", "exports", "imports", "demand",
-            "supply", "employment", "gdp", "cpi", "pmi", "refinery", "shipping",
-            "مخزونات", "إنتاج", "صادرات", "واردات", "طلب", "عرض", "وظائف", "ناتج",
-            "تضخم", "مصافي", "شحن"
+            "gdp", "pmi", "employment", "unemployment", "wages", "retail sales", "ppi",
+            "consumer confidence", "manufacturing", "services", "treasury yield", "bond yields",
+            "eurozone", "japan", "euro", "yen", "dollar"
         ]
-        market_words = [
-            "surprise", "unexpected", "record", "largest", "cut", "increase", "decrease",
-            "قفزة", "مفاجئ", "غير متوقع", "قياسي", "أكبر", "خفض", "زيادة", "انخفاض"
-        ]
+        market_words = ["surprise", "unexpected", "record", "largest", "cut", "increase", "decrease", "مفاجئ", "غير متوقع", "قياسي", "خفض", "زيادة", "انخفاض"]
         h = sum(1 for k in high if k in text)
         m = sum(1 for k in medium if k in text)
         mw = sum(1 for k in market_words if k in text)
-        score = min(100, 25 + h * 10 + m * 5 + mw * 4)
-        level = "مرتفع جداً" if score >= 80 else "مرتفع" if score >= 65 else "متوسط" if score >= 45 else "منخفض"
+        score = min(100, 20 + h * 11 + m * 4 + mw * 3)
+        level = "مرتفع جداً" if score >= 80 else "مرتفع" if score >= 60 else "متوسط" if score >= 40 else "منخفض"
         return {"score": score, "level": level, "high_terms": h, "medium_terms": m, "market_terms": mw}
-
 
     def _event_window_status(self, age_min: float, has_15: bool, has_60: bool) -> str:
         if age_min < 15:
             return "مبكر - لم تكتمل نافذة 15 دقيقة"
         if age_min < 60:
             return "جزئي - نافذة 15 دقيقة مكتملة و60 دقيقة غير مكتملة" if has_15 else "غير مكتمل"
-        if has_60:
-            return "مكتمل 15/60 دقيقة"
-        return "غير مكتمل - لا توجد بيانات كافية لـ60 دقيقة"
-
+        return "مكتمل 15/60 دقيقة" if has_60 else "غير مكتمل - لا توجد بيانات كافية لـ60 دقيقة"
 
     def _expected_news_direction(self, news_item: Dict, asset: str) -> Dict:
-        """تقدير الاتجاه الأساسي المتوقع للخبر قبل النظر إلى السعر؛ ليست إشارة تداول."""
         text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        bull_oil = ["opec cut", "production cut", "supply disruption", "outage", "sanctions", "embargo", "hormuz", "attack", "war", "خفض الإنتاج", "تعطل الإمدادات", "عقوبات", "حظر", "هرمز", "هجوم", "حرب"]
-        bear_oil = ["production increase", "output increase", "supply increase", "ceasefire", "demand slowdown", "inventory build", "زيادة الإنتاج", "زيادة المعروض", "هدنة", "تباطؤ الطلب", "ارتفاع المخزونات"]
-        bull_silver = ["rate cut", "dovish", "weak dollar", "inflation rise", "safe haven", "خفض الفائدة", "دولار ضعيف", "ملاذ آمن", "ارتفاع التضخم"]
-        bear_silver = ["rate hike", "hawkish", "strong dollar", "yield increase", "رفع الفائدة", "دولار قوي", "تشدد نقدي", "ارتفاع العوائد"]
-        bull = sum(1 for x in (bull_oil if asset == "oil" else bull_silver) if x in text)
-        bear = sum(1 for x in (bear_oil if asset == "oil" else bear_silver) if x in text)
-        if bull > bear:
-            return {"direction": "صعود", "strength": min(100, 50 + (bull-bear)*15), "bull_terms": bull, "bear_terms": bear}
-        if bear > bull:
-            return {"direction": "هبوط", "strength": min(100, 50 + (bear-bull)*15), "bull_terms": bull, "bear_terms": bear}
-        return {"direction": "محايد", "strength": 40, "bull_terms": bull, "bear_terms": bear}
-
+        bull = []
+        bear = []
+        if asset == "eurusd":
+            bull = ["ecb hike", "ecb hawkish", "rate hike", "eurozone growth", "eurozone inflation", "strong euro", "eur strength", "تشدد المركزي الأوروبي", "رفع الفائدة", "قوة اليورو"]
+            bear = ["ecb cut", "ecb dovish", "rate cut", "eurozone recession", "weak euro", "eur weakness", "خفض الفائدة", "ضعف اليورو", "ركود منطقة اليورو"]
+        else:
+            # الاتجاه هنا هو USD/JPY نفسه: قوة الدولار/ضعف الين تميل للصعود.
+            bull = ["fed hawkish", "rate hike", "higher yields", "strong dollar", "weak yen", "yen weakness", "dovish boj", "تشدد الفيدرالي", "رفع الفائدة", "ارتفاع العوائد", "قوة الدولار", "ضعف الين"]
+            bear = ["fed dovish", "rate cut", "lower yields", "weak dollar", "strong yen", "yen strength", "hawkish boj", "خفض الفائدة", "انخفاض العوائد", "ضعف الدولار", "قوة الين"]
+        b = sum(1 for x in bull if x in text)
+        s = sum(1 for x in bear if x in text)
+        if b > s:
+            return {"direction": "صعود", "strength": min(100, 50 + (b - s) * 15), "bull_terms": b, "bear_terms": s}
+        if s > b:
+            return {"direction": "هبوط", "strength": min(100, 50 + (s - b) * 15), "bull_terms": b, "bear_terms": s}
+        return {"direction": "محايد", "strength": 40, "bull_terms": b, "bear_terms": s}
 
     def _news_relevance(self, news_item: Dict, asset: str) -> int:
-        """درجة ارتباط الخبر بالأصل حتى لا يحصل الخبر العام على وزن خبر مباشر."""
         text = (self._safe_str(news_item.get("title")) + " " + self._safe_str(news_item.get("description"))).lower()
-        direct = {"oil": ["oil", "crude", "wti", "brent", "opec", "petroleum", "نفط", "خام", "أوبك", "برنت", "إنتاج النفط", "مخزونات النفط"], "silver": ["silver", "xag", "precious metal", "industrial metals", "فضة", "المعادن الثمينة"]}[asset]
-        geo = ["iran", "hormuz", "red sea", "middle east", "israel", "gaza", "yemen", "russia", "ukraine", "sanctions", "إيران", "هرمز", "البحر الأحمر", "الشرق الأوسط", "إسرائيل", "غزة", "اليمن", "روسيا", "أوكرانيا", "عقوبات"]
-        d, g = sum(1 for x in direct if x in text), sum(1 for x in geo if x in text)
-        return min(100, 35 + d*18 + g*8) if (d or g) else 20
-
+        if asset == "eurusd":
+            direct = ["eur/usd", "eurusd", "euro dollar", "euro", "ecb", "eurozone", "euro area", "lagarde", "اليورو", "البنك المركزي الأوروبي", "منطقة اليورو"]
+            indirect = ["fed", "federal reserve", "dollar", "usd", "us inflation", "us jobs", "treasury yields", "الفيدرالي", "الدولار"]
+        else:
+            direct = ["usd/jpy", "usdjpy", "dollar yen", "yen", "jpy", "boj", "bank of japan", "ueda", "japan inflation", "japan wages", "intervention", "الين", "بنك اليابان", "اليابان"]
+            indirect = ["fed", "federal reserve", "dollar", "usd", "us inflation", "us jobs", "treasury yields", "risk aversion", "الفيدرالي", "الدولار"]
+        d = sum(1 for x in direct if x in text)
+        i = sum(1 for x in indirect if x in text)
+        return min(100, 45 + d * 10 + i * 5)
 
     def _compare_news_hypothesis(self, expected: Dict, actual_change: float) -> Dict:
-        """مقارنة فرضية الاتجاه الأساسية بالاستجابة السعرية المقاسة."""
-        if not actual_change:
+        if actual_change is None or abs(actual_change) < 1e-12:
             return {"match": "غير قابل للحكم", "score": 0}
         actual = "صعود" if actual_change > 0 else "هبوط"
         if expected.get("direction") == "محايد":
             return {"match": "محايد/غير حاسم", "score": 40}
         if actual == expected.get("direction"):
-            return {"match": "متوافق", "score": min(100, 60 + int(expected.get("strength", 0)*0.4))}
-        return {"match": "متعارض", "score": max(0, 40 - int(expected.get("strength", 0)*0.3))}
+            return {"match": "متوافق", "score": min(100, 60 + int(expected.get("strength", 0) * 0.4))}
+        return {"match": "متعارض", "score": max(0, 40 - int(expected.get("strength", 0) * 0.3))}
 
-
-    def _complete_report_text(self, content, finish_reason=None):
-        """يتحقق من أن التقرير صالح للإرسال وغير فارغ أو مبتور."""
-        content = self._safe_str(content).strip()
-        if not content:
-            return ""
-        if finish_reason in {"length", "max_tokens"}:
-            return ""
-        # منع إرسال عنوان فقط أو نص قصير غير مفيد.
-        normalized = re.sub(r"[\s\n]+", " ", content).strip()
-        if len(normalized) < 80:
-            return ""
-        return content
-
-
-    def _current_market_state(self, candles_data: Dict, asset: str) -> Dict:
-        """تحديد الاتجاه الحالي للأصل من حركة السعر الفعلية، مستقل عن الأخبار."""
-        data = (candles_data or {}).get(asset) or {}
-        closes = data.get("closes") or []
-        try:
-            vals=[float(x) for x in closes if x is not None and float(x)>0]
-            if len(vals)<15:
-                return {"direction":"غير معروف","strength":"غير كافٍ","change_15m":0.0,"change_60m":0.0}
-            cur=vals[-1]; p15=vals[-16]; p60=vals[-61] if len(vals)>=61 else vals[0]
-            c15=(cur-p15)/p15*100 if p15 else 0.0; c60=(cur-p60)/p60*100 if p60 else 0.0
-            score=c15*0.4+c60*0.6
-            direction="صعود" if score>0.03 else "هبوط" if score<-0.03 else "محايد"
-            mag=abs(score); strength="قوي" if mag>=0.30 else "متوسط" if mag>=0.12 else "ضعيف" if mag>=0.03 else "محايد"
-            return {"direction":direction,"strength":strength,"change_15m":round(c15,3),"change_60m":round(c60,3),"score":round(score,3)}
-        except Exception:
-            return {"direction":"غير معروف","strength":"غير كافٍ","change_15m":0.0,"change_60m":0.0}
+    # ------------------------------------------------------------------
+    # Price measurement
+    # ------------------------------------------------------------------
+    def _get_price_at_time(self, asset_type: str, minutes_ago: int = 5, candles_data: Dict = None) -> Optional[float]:
+        if asset_type not in FOREX_ASSETS:
+            return None
+        if candles_data and asset_type in candles_data:
+            data = candles_data[asset_type] or {}
+            closes = data.get("closes") or []
+            if not closes:
+                return None
+            idx = min(max(0, int(minutes_ago)), len(closes) - 1)
+            try:
+                return float(closes[-idx - 1])
+            except (TypeError, ValueError):
+                return None
+        if self.candle_fetcher:
+            try:
+                data = self.candle_fetcher(FOREX_SYMBOLS[asset_type], "Min1", min(500, max(20, abs(minutes_ago) + 5)))
+                closes = (data or {}).get("closes") or []
+                if closes:
+                    idx = min(max(0, int(minutes_ago)), len(closes) - 1)
+                    return float(closes[-idx - 1])
+            except Exception as exc:
+                logging.debug(f"Tona Forex price fetch failed: {exc}")
+        return None
 
     def analyze_news_impact(self, news_item: Dict, candles_data: Dict = None) -> Dict:
-        """قياس نافذة الخبر من لحظة النشر، مع تمييز القابلية الأساسية عن الأثر الفعلي."""
-        asset_hint = self._news_asset(news_item)
+        targets = self._news_target_assets(news_item)
         potential = self._news_potential(news_item)
         result = {
             "title": self._safe_str(news_item.get("title")),
             "description": self._safe_str(news_item.get("description")),
             "source": self._safe_str(news_item.get("source")),
             "published_at": self._safe_str(news_item.get("published_at")),
-            "oil_change_15m": 0.0, "oil_change_60m": 0.0,
-            "silver_change_15m": 0.0, "silver_change_60m": 0.0,
-            "oil_price_before": 0.0, "oil_price_at_news": 0.0, "oil_price_15min": 0.0, "oil_price_60min": 0.0,
-            "silver_price_before": 0.0, "silver_price_at_news": 0.0, "silver_price_15min": 0.0, "silver_price_60min": 0.0,
+            "target_assets": targets,
             "is_significant": False, "direction": "محايد", "classification": "غير مؤثر",
-            "change_pct": 0.0, "asset": asset_hint,
+            "change_pct": None, "asset": targets[0] if len(targets) == 1 else "eurusd/usdjpy",
             "news_potential_score": potential["score"], "news_potential": potential["level"],
             "measurement_status": "غير مقاس", "causality": "غير مثبت",
         }
+        for asset in FOREX_ASSETS:
+            result[f"{asset}_change_15m"] = None
+            result[f"{asset}_change_60m"] = None
+            result[f"{asset}_price_before"] = None
+            result[f"{asset}_price_at_news"] = None
+            result[f"{asset}_price_15min"] = None
+            result[f"{asset}_price_60min"] = None
+
         try:
             pub_time = self._parse_published_time(news_item.get("published_at"))
             if pub_time is None:
                 result["measurement_status"] = "وقت الخبر غير صالح"
                 return result
             pub_utc = pub_time.replace(tzinfo=timezone.utc) if pub_time.tzinfo is None else pub_time.astimezone(timezone.utc)
-            now_utc = datetime.now(timezone.utc)
-            age_min = (now_utc - pub_utc).total_seconds() / 60.0
-            if age_min < -10:
-                result["measurement_status"] = "الخبر مستقبلي/وقت غير متزامن"
-                return result
-            age_min = max(0.0, age_min)
+            age_min = max(0.0, (datetime.now(timezone.utc) - pub_utc).total_seconds() / 60.0)
             result["news_age_minutes"] = round(age_min, 1)
 
-            completed_15 = False
-            completed_60 = False
-            measured_assets = []
-            for asset in ("eurusd", "usdjpy"):
-                data = (candles_data or {}).get(asset) or {}
-                closes = data.get("closes") or []
-                # يتطلب القياس أن تكون السلسلة دقيقة واحدة. إذا كان هناك timestamp نستخدمه بدلاً من افتراض الفهرس.
+            measured = []
+            has15 = has60 = False
+            for asset in targets:
+                closes = ((candles_data or {}).get(asset) or {}).get("closes") or []
                 if len(closes) < 20:
                     continue
                 n = len(closes)
                 event_idx = n - 1 - int(round(age_min))
-                if event_idx < 0 or event_idx >= n:
+                if not (0 <= event_idx < n):
                     continue
-                p_event = float(closes[event_idx]) if closes[event_idx] is not None else 0.0
-                if p_event <= 0:
+                try:
+                    p_event = float(closes[event_idx])
+                    p_before = float(closes[max(0, event_idx - 30)])
+                except (TypeError, ValueError):
                     continue
-                before_idx = max(0, event_idx - 30)
-                p_before = float(closes[before_idx]) if closes[before_idx] is not None else p_event
-                result[f"{asset}_price_before"] = round(p_before, 4)
-                result[f"{asset}_price_at_news"] = round(p_event, 4)
+                if p_event <= 0 or p_before <= 0:
+                    continue
+                result[f"{asset}_price_before"] = round(p_before, 6)
+                result[f"{asset}_price_at_news"] = round(p_event, 6)
 
-                idx15 = event_idx + 15
-                idx60 = event_idx + 60
-                if idx15 < n and closes[idx15] is not None:
-                    p15 = float(closes[idx15])
-                    if p15 > 0:
-                        result[f"{asset}_price_15min"] = round(p15, 4)
-                        result[f"{asset}_change_15m"] = round((p15 - p_event) / p_event * 100, 4)
-                        completed_15 = True
-                        measured_assets.append(asset)
-                if idx60 < n and closes[idx60] is not None:
-                    p60 = float(closes[idx60])
-                    if p60 > 0:
-                        result[f"{asset}_price_60min"] = round(p60, 4)
-                        result[f"{asset}_change_60m"] = round((p60 - p_event) / p_event * 100, 4)
-                        completed_60 = True
-                        measured_assets.append(asset)
+                idx15, idx60 = event_idx + 15, event_idx + 60
+                if idx15 < n:
+                    try:
+                        p15 = float(closes[idx15])
+                        ch15 = (p15 - p_event) / p_event * 100
+                        result[f"{asset}_price_15min"] = round(p15, 6)
+                        result[f"{asset}_change_15m"] = round(ch15, 5)
+                        measured.append((asset, "15m", ch15))
+                        has15 = True
+                    except (TypeError, ValueError):
+                        pass
+                if idx60 < n:
+                    try:
+                        p60 = float(closes[idx60])
+                        ch60 = (p60 - p_event) / p_event * 100
+                        result[f"{asset}_price_60min"] = round(p60, 6)
+                        result[f"{asset}_change_60m"] = round(ch60, 5)
+                        measured.append((asset, "60m", ch60))
+                        has60 = True
+                    except (TypeError, ValueError):
+                        pass
 
-            result["measurement_status"] = self._event_window_status(age_min, completed_15, completed_60)
-            if not measured_assets:
+            result["measurement_status"] = self._event_window_status(age_min, has15, has60)
+            if not measured:
                 return result
 
-            # نستخدم أكبر حركة مكتملة، لكن لا نسميها "سببية"؛ هي ارتباط زمني مقاس فقط.
-            changes = []
-            for asset in ("eurusd", "usdjpy"):
-                for window in ("15m", "60m"):
-                    v = float(result.get(f"{asset}_change_{window}", 0) or 0)
-                    if v != 0:
-                        changes.append((abs(v), asset, v, window))
-            if not changes:
-                return result
-            _, best_asset, best_change, best_window = max(changes, key=lambda x: x[0])
+            best_asset, best_window, best_change = max(measured, key=lambda x: abs(x[2]))
             result["asset"] = best_asset
-            result["change_pct"] = best_change
+            result["change_pct"] = round(best_change, 5)
             result["direction"] = "صعود" if best_change > 0 else "هبوط" if best_change < 0 else "محايد"
-            result["max_measured_change"] = round(abs(best_change), 4)
             result["measurement_window"] = best_window
+            result["max_measured_change"] = round(abs(best_change), 5)
 
-            max_change = abs(best_change)
             relevance = self._news_relevance(news_item, best_asset)
             expected = self._expected_news_direction(news_item, best_asset)
             hypothesis = self._compare_news_hypothesis(expected, best_change)
-            result["asset_relevance_score"] = relevance
-            result["expected_direction"] = expected["direction"]
-            result["expected_direction_strength"] = expected["strength"]
-            result["direction_hypothesis_match"] = hypothesis["match"]
-            result["direction_hypothesis_score"] = hypothesis["score"]
-            result["bullish_event_terms"] = expected["bull_terms"]
-            result["bearish_event_terms"] = expected["bear_terms"]
-            measured_score = min(100, int(max_change / max(IMPACT_THRESHOLDS["high"], 0.0001) * 70))
-            result["intelligence_confidence"] = max(0, min(100, round(
-                0.35*potential["score"] + 0.25*relevance + 0.20*hypothesis["score"] + 0.20*measured_score)))
-            if max_change >= IMPACT_THRESHOLDS["very_high"]:
-                result["classification"] = "قوي جداً"; result["is_significant"] = True
-            elif max_change >= IMPACT_THRESHOLDS["high"]:
-                result["classification"] = "مرتفع"; result["is_significant"] = True
-            elif max_change >= IMPACT_THRESHOLDS["medium"]:
-                result["classification"] = "متوسط"; result["is_significant"] = True
-            elif max_change >= IMPACT_THRESHOLDS["low"]:
+            confidence = 0.30 * potential["score"] + 0.25 * relevance + 0.15 * hypothesis["score"] + 0.30 * min(100, abs(best_change) / IMPACT_THRESHOLDS["very_high"] * 70)
+            result.update({
+                "asset_relevance_score": relevance,
+                "expected_direction": expected["direction"],
+                "expected_direction_strength": expected["strength"],
+                "direction_hypothesis_match": hypothesis["match"],
+                "direction_hypothesis_score": hypothesis["score"],
+                "intelligence_confidence": max(0, min(100, round(confidence))),
+            })
+            mc = abs(best_change)
+            if mc >= IMPACT_THRESHOLDS["very_high"]:
+                result["classification"], result["is_significant"] = "قوي جداً", True
+            elif mc >= IMPACT_THRESHOLDS["high"]:
+                result["classification"], result["is_significant"] = "قوي", True
+            elif mc >= IMPACT_THRESHOLDS["medium"]:
+                result["classification"], result["is_significant"] = "متوسط", True
+            elif mc >= IMPACT_THRESHOLDS["low"]:
                 result["classification"] = "ضعيف"
-            else:
-                result["classification"] = "غير مؤثر"
-
-            # القابلية العالية + حركة صغيرة = خبر محتمل الأهمية لكن بلا تأكيد سعري.
-            if potential["score"] >= 65 and relevance >= 45 and max_change < IMPACT_THRESHOLDS["medium"]:
-                result["classification"] = "مهم أساسياً - تأثير سعري غير مؤكد"
-            elif potential["score"] >= 65 and relevance < 45:
-                result["classification"] = "مهم إعلامياً - ارتباط الأصل ضعيف"
-            elif expected["direction"] != "محايد" and hypothesis["match"] == "متعارض" and max_change >= IMPACT_THRESHOLDS["low"]:
-                result["classification"] = "خبر مهم - استجابة السوق معاكسة"
-            if result["is_significant"]:
-                result["causality"] = "ارتباط زمني قوي، السببية غير مثبتة"
-            elif completed_15 or completed_60:
-                result["causality"] = "لم يثبت تأثير سعري ملموس"
+            result["causality"] = "ارتباط زمني قوي، السببية غير مثبتة" if result["is_significant"] else "لا توجد حركة سعرية قوية كافية لإسناد أثر مباشر"
             return result
-        except Exception as e:
-            result["measurement_status"] = f"خطأ: {type(e).__name__}"
-            logging.error(f"❌ خطأ في تحليل الخبر: {e}")
-            logging.debug(traceback.format_exc())
+        except Exception as exc:
+            result["measurement_status"] = f"خطأ: {type(exc).__name__}"
+            logging.error(f"❌ Tona Forex news analysis error: {exc}")
             return result
 
-
+    # ------------------------------------------------------------------
+    # Memory
+    # ------------------------------------------------------------------
     def _safe_str(self, value):
-        """تحويل أي قيمة إلى سلسلة نصية آمنة"""
         if value is None:
             return ""
         if isinstance(value, str):
             return value
         if isinstance(value, (int, float, bool)):
             return str(value)
-        if isinstance(value, list) or isinstance(value, dict):
+        try:
             return json.dumps(value, ensure_ascii=False)
-        return str(value)
+        except Exception:
+            return str(value)
 
-    # =====================================================================
-    # 🗂️ إدارة الأخبار المؤثرة النشطة (بذاكرة مشتركة)
-    # =====================================================================
+    def _parse_published_time(self, published_at: str) -> Optional[datetime]:
+        if not published_at:
+            return None
+        formats = [
+            "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%d %H:%M:%S", "%a, %d %b %Y %H:%M:%S %Z",
+            "%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z"
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(published_at, fmt)
+            except Exception:
+                pass
+        try:
+            return datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+        except Exception:
+            return None
 
     def store_active_news(self, impact: Dict):
-        """تخزين خبر مؤثر في الذاكرة النشطة مع وقت انتهاء صلاحية (ساعتين)"""
-        if not impact or not impact.get("is_significant", False):
+        if not impact or not impact.get("is_significant") or impact.get("asset") not in FOREX_ASSETS:
             return
-
         expiry = datetime.now() + timedelta(hours=2)
-        news_entry = {
+        entry = {
             "title": impact.get("title", "خبر غير معروف"),
             "direction": impact.get("direction", "محايد"),
             "change_pct": impact.get("change_pct", 0.0),
-            "asset": impact.get("asset", "oil"),
+            "asset": impact.get("asset"),
             "classification": impact.get("classification", "غير مؤثر"),
-            "expiry": expiry,
-            "timestamp": datetime.now().isoformat(),
+            "expiry": expiry, "timestamp": datetime.now().isoformat(),
             "source": impact.get("source", "غير معروف")
         }
-
-        # إزالة أي تكرار (نفس العنوان)
-        self._active_news = [n for n in self._active_news if n.get("title") != news_entry["title"]]
-        self._active_news.append(news_entry)
-
-        # تنظيف المنتهية صلاحيتها
+        self._active_news[:] = [n for n in self._active_news if n.get("title") != entry["title"]]
+        self._active_news.append(entry)
         self.clear_expired_news()
-
-        logging.info(f"📰 تم تخزين خبر مؤثر: {news_entry['title'][:50]}... (تأثير: {news_entry['change_pct']:.2f}%)")
 
     def get_active_news(self, asset_type: str = None) -> List[Dict]:
-        """استرجاع الأخبار المؤثرة النشطة (غير منتهية الصلاحية)"""
         self.clear_expired_news()
         if asset_type:
+            if asset_type not in FOREX_ASSETS:
+                return []
             return [n for n in self._active_news if n.get("asset") == asset_type]
         return self._active_news.copy()
 
     def clear_expired_news(self):
-        """حذف الأخبار المنتهية صلاحيتها"""
         now = datetime.now()
-        self._active_news = [n for n in self._active_news if n.get("expiry", now) > now]
+        self._active_news[:] = [n for n in self._active_news if n.get("expiry", now) > now]
         if len(self._active_news) > 50:
-            self._active_news = self._active_news[-50:]
+            del self._active_news[:-50]
 
     def get_strongest_news(self, asset_type: str = None) -> Optional[Dict]:
-        """الحصول على أقوى خبر مؤثر حالياً (أكبر تغير مئوي)"""
-        active = self.get_active_news(asset_type)
-        if not active:
-            return None
-        return max(active, key=lambda x: abs(x.get("change_pct", 0)))
+        items = self.get_active_news(asset_type)
+        return max(items, key=lambda x: abs(float(x.get("change_pct", 0) or 0)), default=None)
 
-    # =====================================================================
-    # 🧠 صياغة التقرير (معتمد على الأرقام فقط، بدون جداول أو رموز غريبة)
-    # =====================================================================
-
-    def _groq_report(self, analyzed_news: List[Dict], oil_price: float, silver_price: float, fetch_stats: Optional[Dict] = None) -> str:
-        """صياغة التقرير عبر Groq مع فصل واضح بين غياب الأخبار وفشل النموذج.
-        لا نسمح بقطع التقرير عند نهاية نافذة التوليد؛ وإذا أعاد المزود
-        استجابة ناقصة نعيد الطلب بصيغة أقصر ومكتملة.
-        """
-        fetch_stats = fetch_stats or self._last_fetch_stats or {}
-        try:
-            # الحالة الحالية للسوق مستقلة عن أثر الأخبار، وتظهر صراحة في الحكم النهائي.
-            candles_for_state = getattr(self, "_last_candles_data", {}) or {}
-            oil_state = self._current_market_state(candles_for_state, "oil")
-            silver_state = self._current_market_state(candles_for_state, "silver")
-            significant_news = [n for n in analyzed_news if n and n.get("is_significant", False)]
-            candidate_news = [n for n in analyzed_news if n]
-
-            # لا نمنع النموذج من العمل عند عدم وجود خبر مؤثر؛ بل نعطيه حالة البيانات كاملة.
-            news_lines = []
-            for news in candidate_news[:8]:
-                title = self._safe_str(news.get("title"))[:140]
-                asset = "النفط" if news.get("asset") == "oil" else "الفضة" if news.get("asset") == "silver" else "النفط/الفضة"
-                c15 = float(news.get("oil_change_15m", 0) or news.get("silver_change_15m", 0) or 0)
-                c60 = float(news.get("oil_change_60m", 0) or news.get("silver_change_60m", 0) or 0)
-                news_lines.append(f"- {title} | المصدر: {self._safe_str(news.get('source'))} | الأصل: {asset} | 15د={c15:+.3f}% | 60د={c60:+.3f}% | التصنيف={self._safe_str(news.get('classification'))} | أهمية={news.get('news_potential_score',0)} | ارتباط الأصل={news.get('asset_relevance_score',0)} | الاتجاه المتوقع={self._safe_str(news.get('expected_direction'))} | توافق الاتجاه={self._safe_str(news.get('direction_hypothesis_match'))} | الثقة الاستخباراتية={news.get('intelligence_confidence',0)} | القياس={self._safe_str(news.get('measurement_status'))}")
-            news_text = "\n".join(news_lines) if news_lines else "لا توجد أخبار اجتازت مرحلة التحليل السعري."
-
-            prompt = f"""أنت محرك صياغة استخباراتي يعمل داخل Tona Intelligence. لا تخترع أخباراً أو أسباباً أو أرقاماً.
-
-حالة جمع البيانات:
-- المصادر الكلية: {fetch_stats.get('sources_total', 0)}
-- المصادر الناجحة: {fetch_stats.get('sources_ok', 0)}
-- المصادر الفاشلة: {fetch_stats.get('sources_failed', 0)}
-- الأخبار الفريدة: {fetch_stats.get('unique_items', 0)}
-- الأخبار التي دخلت التحليل: {len(candidate_news)}
-- الأخبار ذات التأثير المقاس الذي تجاوز العتبة: {len(significant_news)}
-- الأخبار ذات القابلية الأساسية المرتفعة: {sum(1 for n in candidate_news if n.get("news_potential_score", 0) >= 65)}
-- متوسط الثقة الاستخباراتية: {round(sum(float(n.get("intelligence_confidence", 0) or 0) for n in candidate_news) / len(candidate_news), 1) if candidate_news else 0}
-- الأخبار ذات الفرضية الاتجاهية المتوافقة مع حركة السعر: {sum(1 for n in candidate_news if n.get("direction_hypothesis_match") == "متوافق")}
-- الأخبار ذات الفرضية الاتجاهية المتعارضة مع حركة السعر: {sum(1 for n in candidate_news if n.get("direction_hypothesis_match") == "متعارض")}
-
-الأسعار الحالية: النفط={float(oil_price or 0):.3f}، الفضة={float(silver_price or 0):.3f}
-الاتجاه الحالي الفعلي للنفط: {oil_state["direction"]} {oil_state["strength"]} | 15د={oil_state["change_15m"]:+.3f}% | 60د={oil_state["change_60m"]:+.3f}%
-الاتجاه الحالي الفعلي للفضة: {silver_state["direction"]} {silver_state["strength"]} | 15د={silver_state["change_15m"]:+.3f}% | 60د={silver_state["change_60m"]:+.3f}%
-
-الأخبار والقياسات:
-{news_text}
-
-اكتب تقريراً عربياً مهنياً كاملاً، واضحاً ومترابطاً، من 10-16 سطراً تقريباً.
-ابدأ بملخص حالة المصادر والتغطية، ثم حلل أهم الأخبار، ثم قدم حكماً استخباراتياً نهائياً. يجب أن يتضمن الحكم النهائي صراحةً الاتجاه الحالي الفعلي للنفط والفضة (صعود/هبوط/محايد مع قوي/متوسط/ضعيف)، ثم اتجاه الأخبار، ثم مستوى الثقة، ولا تستبدل الاتجاه الحالي بعبارة عامة مثل "السوق ينتظر".
-لكل خبر مهم، عند توفر البيانات، اذكر باختصار: أهمية الخبر، ارتباطه بالأصل، الاتجاه المتوقع، حركة 15 دقيقة، حركة 60 دقيقة، وتوافق الفرضية مع السوق.
-- افصل دائماً بين أهمية الخبر المحتملة وبين التأثير السعري المقاس.
-- إذا كان الخبر عالي الأهمية أساسياً لكن الحركة السعرية صغيرة أو النافذة غير مكتملة، قل "مهم أساسياً لكن التأثير السعري غير مؤكد" ولا تقل "غير مؤثر" بشكل مطلق.
-- إذا فشلت مصادر كثيرة: اذكر أن تغطية المصادر جزئية، ولا تجعل ذلك دليلاً على غياب الأخبار.
-- إذا كانت نافذة القياس غير مكتملة، اذكر ذلك صراحة ولا تعاملها كصفر.
-- ميّز بين الخبر المنشور وبين التأثير الذي تم قياسه فعلياً.
-- لا تحوّل الارتباط الزمني إلى سببية مؤكدة.
-- لا تقدم أرقاماً غير موجودة في البيانات، ولا تعتبر تغير السعر الحالي دليلاً على تأثير خبر قديم.
-- لا تختم التقرير قبل اكتمال الخلاصة العملية.
-- لا تخلط بين الاتجاه الحالي للسعر وبين اتجاه الخبر؛ اذكرهما منفصلين.
-- لا تستخدم عبارات حشو أو تكرر نفس الخبر.
-- مهم جداً: لا تتوقف في منتصف جملة أو فقرة. يجب أن تكون الاستجابة مكتملة لغوياً وتنتهي بخلاصة واضحة.
-"""
-
-            if not self.groq_api_key:
-                self._last_report_status = {"provider": "fallback", "reason": "missing_groq_api_key"}
-                logging.error("❌ Groq غير متاح: GROQ_API_KEY مفقود")
-                return self._fallback_report(analyzed_news, oil_price, silver_price, reason="missing_groq_api_key", fetch_stats=fetch_stats)
-
-            headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
-            payload = {
-                "model": "openai/gpt-oss-120b",
-                "messages": [
-                    {"role": "system", "content": "أنت طبقة صياغة فقط. التزم بالأرقام والأخبار المقدمة ولا تخترع معلومات."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.12, "max_tokens": 1800
-            }
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=25)
-            if response.status_code == 200:
-                data = response.json()
-                choice = (data.get("choices") or [{}])[0]
-                first_content = self._safe_str(((choice.get("message") or {}).get("content"))).strip()
-                first_finish = self._safe_str(choice.get("finish_reason"))
-
-                # المسار الأول: الاستجابة مكتملة.
-                complete = self._complete_report_text(first_content, first_finish)
-                if complete:
-                    self._last_report_status = {"provider": "groq", "reason": "success"}
-                    logging.info("✅ Tona: تم توليد تقرير مكتمل بواسطة Groq")
-                    return complete
-
-                # المسار الثاني: إعادة توليد قصيرة ومضمونة البنية.
-                retry_payload = {
-                    "model": "openai/gpt-oss-120b",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "أنت طبقة صياغة فقط. اكتب تقريراً استخباراتياً عربياً "
-                                "مكتمل الجمل، موجزاً، ولا تخترع أي رقم أو خبر. "
-                                "يجب أن ينتهي التقرير بخلاصة عملية كاملة."
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt + """
-تعليمات طارئة للطول:
-اكتب نسخة مختصرة من 7 إلى 10 فقرات قصيرة.
-لا تتجاوز 900 كلمة.
-احتفظ فقط بأهم الأخبار والأرقام والاستنتاج النهائي.
-يجب أن تنتهي بجملة كاملة، ولا تستخدم علامة الحذف (...).
-"""
-                        }
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 1600
-                }
-
-                retry_ok = False
-                retry_content = ""
-                retry_finish = ""
-                try:
-                    retry = requests.post(self.api_url, headers=headers, json=retry_payload, timeout=25)
-                    if retry.status_code == 200:
-                        rd = retry.json()
-                        rchoice = (rd.get("choices") or [{}])[0]
-                        retry_content = self._safe_str(
-                            ((rchoice.get("message") or {}).get("content"))
-                        ).strip()
-                        retry_finish = self._safe_str(rchoice.get("finish_reason"))
-                        retry_ok = bool(self._complete_report_text(retry_content, retry_finish))
-                        if retry_ok:
-                            self._last_report_status = {
-                                "provider": "groq",
-                                "reason": "success_after_retry"
-                            }
-                            logging.warning(
-                                "⚠️ Tona: تمت إعادة صياغة التقرير بنجاح بعد عدم اكتمال الاستجابة الأولى"
-                            )
-                            return retry_content
-                        logging.warning(
-                            "⚠️ Tona: إعادة الصياغة الثانية لم تنتج تقريراً مكتملًا "
-                            f"(finish_reason={retry_finish or 'unknown'})"
-                        )
-                    else:
-                        logging.warning(
-                            f"⚠️ Tona: فشلت إعادة الصياغة HTTP {retry.status_code}"
-                        )
-                except Exception as retry_error:
-                    logging.warning(f"⚠️ Tona: فشلت إعادة محاولة التقرير: {retry_error}")
-
-                # المسار الثالث: لا نرسل أبداً عنواناً فارغاً أو نصاً مبتوراً.
-                reason = "incomplete_model_response"
-                logging.warning(
-                    "⚠️ Tona: تم تفعيل التقرير الاحتياطي لأن جميع محاولات النموذج "
-                    "لم تنتج استجابة مكتملة"
-                )
-            else:
-                reason = f"http_{response.status_code}"
-                logging.error(
-                    f"❌ Groq HTTP {response.status_code}: "
-                    f"{self._safe_str(response.text)[:500]}"
-                )
-
-        except Exception as e:
-            reason = f"{type(e).__name__}: {e}"
-            logging.error(f"❌ Groq فشل: {reason}")
-            logging.debug(traceback.format_exc())
-
-        self._last_report_status = {"provider": "fallback", "reason": reason}
-        return self._fallback_report(analyzed_news, oil_price, silver_price, reason=reason, fetch_stats=fetch_stats)
-
-
-    def _fallback_report(self, analyzed_news, oil_price, silver_price, reason="no_significant_news", fetch_stats=None) -> str:
-        """تقرير احتياطي في حال فشل Groq أو عدم وجود أخبار مؤثرة"""
-        try:
-            lines = []
-            lines.append("🧠 تقرير تولين الاستخباراتي")
-            lines.append("")
-            lines.append(f"الساعة: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            lines.append("━" * 40)
-            lines.append("")
-
-            if oil_price:
-                lines.append(f"سعر النفط: {float(oil_price):.2f} دولار")
-            if silver_price:
-                lines.append(f"سعر الفضة: {float(silver_price):.3f} دولار")
-
-            oil_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "oil")
-            silver_state = self._current_market_state(getattr(self, "_last_candles_data", {}) or {}, "silver")
-            lines.append(f"الاتجاه الحالي للنفط: {oil_state['direction']} {oil_state['strength']} | 15د {oil_state['change_15m']:+.3f}% | 60د {oil_state['change_60m']:+.3f}%")
-            lines.append(f"الاتجاه الحالي للفضة: {silver_state['direction']} {silver_state['strength']} | 15د {silver_state['change_15m']:+.3f}% | 60د {silver_state['change_60m']:+.3f}%")
-
-            fetch_stats = fetch_stats or self._last_fetch_stats or {}
-            significant = [n for n in analyzed_news if n and n.get("is_significant", False)] if analyzed_news else []
-
-            if significant:
-                lines.append("")
-                lines.append("أخبار مؤثرة (تأثير فعلي مقاس):")
-                for news in significant[:3]:
-                    if not news:
-                        continue
-                    title = self._safe_str(news.get("title"))
-                    change_60m = news.get("oil_change_60m", 0) or news.get("silver_change_60m", 0) or 0
-                    change_15m = news.get("oil_change_15m", 0) or news.get("silver_change_15m", 0) or 0
-                    direction = "ارتفاع" if change_60m > 0 else "هبوط" if change_60m < 0 else "استقرار"
-                    classification = news.get("classification", "غير مؤثر")
-                    lines.append(f"• {title[:60]}...")
-                    lines.append(f"  → {direction} بنسبة {abs(change_60m):.2f}% خلال 60 دقيقة (فوري: {change_15m:+.2f}%) - {classification}")
-            else:
-                lines.append("")
-                if reason == "no_significant_news":
-                    if fetch_stats.get("sources_ok", 0) > 0:
-                        lines.append("تم فحص مصادر الأخبار المتاحة، ولم يظهر تأثير سعري مقاس يتجاوز عتبة التأثير حالياً.")
-                    else:
-                        lines.append("تعذر التحقق من الأخبار بشكل كافٍ بسبب فشل مصادر الجمع.")
-                else:
-                    lines.append(f"⚠️ تعذر توليد التقرير الذكي ({reason}). تم استخدام التقرير الاحتياطي دون اختلاق أخبار.")
-
-            lines.append("")
-            lines.append("التوصيات:")
-            if significant:
-                avg_change = sum(n.get("oil_change_60m", 0) or n.get("silver_change_60m", 0) for n in significant[:3]) / len(significant[:3]) if significant else 0
-                if avg_change > 0.5:
-                    lines.append("• الاتجاه العام صاعد مدعوم بالأخبار.")
-                elif avg_change < -0.5:
-                    lines.append("• الاتجاه العام هابط تحت ضغط الأخبار.")
-                else:
-                    lines.append("• السوق متقلب، انتظر تأكيداً إضافياً.")
-                lines.append("• راقب الصفقات المفتوحة بحذر.")
-            else:
-                lines.append("• استمر في متابعة المؤشرات الفنية.")
-                lines.append("• ابحث عن فرص الدخول بناءً على التحليل الفني.")
-
-            lines.append("")
-            lines.append("━" * 40)
-            lines.append("💙 تولين: أنا هنا لمساعدتك!")
-
-            report = "\n".join(lines).strip()
-            # ضمان عدم رجوع نص فارغ مهما كان سبب الفشل.
-            if len(report) < 80:
-                report = (
-                    "🧠 تقرير تولين الاستخباراتي\n\n"
-                    "تعذر توليد التقرير الذكي حالياً، لذلك تم استخدام ملخص احتياطي.\n"
-                    "التوصية: لا تعتمد على الأخبار وحدها، وانتظر تأكيد التحليل الفني.\n\n"
-                    "💙 تولين: أنا هنا لمساعدتك!"
-                ).strip()
-            return report
-
-        except Exception as e:
-            logging.error(f"❌ فشل التقرير الاحتياطي: {e}")
-            logging.debug(traceback.format_exc())
-            return (
-                "🧠 تقرير تولين الاستخباراتي\n\n"
-                "تعذر توليد التقرير حالياً. يرجى الاعتماد مؤقتاً على التحليل الفني "
-                "وانتظار المحاولة التالية.\n\n"
-                "💙 تولين: أنا هنا لمساعدتك!"
-            )
-
-
-
-    # =====================================================================
-    # 🚨 Breaking News Radar V1.0 - التحذير العاجل القائم على الخبر + السعر
-    # =====================================================================
-    # الفكرة: لا يصدر تحذير عاجل لمجرد وجود خبر مهم. يجب أن يترافق الخبر
-    # مع حركة سعرية مفاجئة ومتزامنة معه ومتوافقة مع اتجاه الخبر.
-    # الرادار خفيف: لا يستخدم Groq في الفحص الأولي ولا يعيد تحليل الأخبار
-    # القديمة، ويمكن تشغيله كل 15 دقيقة مع إعادة تحقق سريعة فقط للمرشحين.
-
-    RADAR_INTERVAL_SECONDS = 15 * 60
-    RADAR_CONFIRMATION_SECONDS = 60
-    RADAR_MAX_ALERTS_PER_HOUR = 3
-    RADAR_DUPLICATE_COOLDOWN_SECONDS = 6 * 3600
-    RADAR_MIN_ABSOLUTE_MOVE_PCT = {"oil": 0.45, "silver": 0.60}
-    RADAR_MIN_RELATIVE_MOVE = 1.8
-    RADAR_MIN_NEWS_SCORE = 55
-    RADAR_STRONG_SCORE = 82
-
-    def _radar_news_score(self, news: Dict, asset: str, change_pct: float, timing_score: float) -> Tuple[int, Dict]:
-        """تقييم حتمي خفيف قبل أي نموذج لغوي."""
-        text = (self._safe_str(news.get("title")) + " " + self._safe_str(news.get("description"))).lower()
-        source = self._safe_str(news.get("source", ""))
-        score = 0
-        reasons = []
-
-        direct_terms = {
-            "oil": ["oil", "crude", "brent", "wti", "opec", "production", "supply", "export", "pipeline", "refinery", "hormuz", "strait", "نفط", "خام", "أوبك", "إمدادات", "هرمز"],
-            "silver": ["silver", "xag", "precious metal", "metals", "gold", "fed", "interest rate", "inflation", "فضة", "ذهب", "الفيدرالي", "الفائدة", "التضخم"]
-        }
-        crisis_terms = ["shutdown", "closed", "closure", "attack", "strike", "blocked", "blockade", "sanction", "embargo", "disruption", "halt", "cut", "emergency", "war", "invasion", "explosion", "إغلاق", "هجوم", "ضربة", "حصار", "عقوبات", "حظر", "تعطل", "توقف", "خفض", "حرب"]
-        terms = direct_terms.get(asset, [])
-        direct_hits = sum(1 for t in terms if t in text)
-        crisis_hits = sum(1 for t in crisis_terms if t in text)
-
-        if direct_hits >= 2:
-            score += 25
-            reasons.append("ارتباط مباشر بالأصل")
-        elif direct_hits == 1:
-            score += 15
-            reasons.append("ارتباط محتمل بالأصل")
-        if crisis_hits:
-            score += min(25, 10 + crisis_hits * 5)
-            reasons.append("حدث جوهري/طارئ")
-        if source in self.trusted_sources or any(x.lower() in source.lower() for x in self.trusted_sources if x):
-            score += 10
-            reasons.append("مصدر موثوق")
-
-        abs_move = abs(change_pct)
-        base = self.RADAR_MIN_ABSOLUTE_MOVE_PCT[asset]
-        if abs_move >= base:
-            score += 20
-            reasons.append(f"حركة سعرية مفاجئة {change_pct:+.2f}%")
-        if timing_score >= 0.8:
-            score += 15
-            reasons.append("تزامن زمني قوي")
-        elif timing_score >= 0.55:
-            score += 8
-            reasons.append("تزامن زمني متوسط")
-
-        return min(100, score), {"direct_hits": direct_hits, "crisis_hits": crisis_hits, "reasons": reasons}
-
-    def _radar_extract_price_window(self, asset: str, candles: Dict) -> Optional[Dict]:
-        """استخراج حركة قصيرة المدى من شموع Min1 دون طلب شبكة إضافي."""
-        data = candles.get(asset) if isinstance(candles, dict) else None
-        if not isinstance(data, dict):
-            return None
-        closes = data.get("closes") or []
-        if len(closes) < 6:
-            return None
-        try:
-            current = float(closes[-1])
-            # مقارنة 5 دقائق، وهي مناسبة للرادار الخفيف وليست إشارة تداول.
-            before = float(closes[-6])
-            if before <= 0 or current <= 0:
-                return None
-            change = (current - before) / before * 100.0
-            return {"current": current, "before": before, "change_pct": change}
-        except (TypeError, ValueError, IndexError):
-            return None
-
-    def _radar_alert_fingerprint(self, news: Dict, asset: str) -> str:
-        raw = f"{asset}|{news.get('url','')}|{news.get('title','')}|{news.get('published_at','')}"
-        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
-
-    def _fetch_radar_news(self, hours=1):
-        """فحص خفيف: مصادر أولوية فقط، بدل إعادة طلب جميع المصادر الـ17."""
-        feeds = [
-            "https://feeds.reuters.com/reuters/commoditiesNews",
-            "https://feeds.bbci.co.uk/news/business/rss.xml",
-            "https://oilprice.com/rss/energy-news",
-            "https://oilprice.com/rss/geopolitics",
-            "https://www.aljazeera.com/xml/rss/all.xml",
-            "https://feeds.skynews.com/feeds/rss/world.xml",
-            "https://www.aljazeera.net/feeds/rss",
-            "https://www.alarabiya.net/feed/rss",
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
+    def _arabic_title(self, item: Dict) -> str:
+        for key in ("title_ar", "arabic_title", "summary_ar"):
+            value = self._safe_str(item.get(key)).strip()
+            if value and not re.search(r"[A-Za-z]{3,}", value):
+                return value[:180]
+        raw = self._safe_str(item.get("title")).lower()
+        mappings = [
+            (("federal reserve",), "تطورات السياسة النقدية الأمريكية"),
+            (("ecb",), "تطورات السياسة النقدية للبنك المركزي الأوروبي"),
+            (("bank of japan",), "تطورات السياسة النقدية لبنك اليابان"),
+            (("boj",), "تطورات السياسة النقدية لبنك اليابان"),
+            (("inflation", "euro"), "تطورات التضخم في منطقة اليورو وتأثيرها المحتمل على اليورو"),
+            (("inflation", "japan"), "تطورات التضخم الياباني وتأثيرها المحتمل على الين"),
+            (("yen", "intervention"), "تطورات تدخل السلطات اليابانية في سوق العملات"),
+            (("nfp",), "بيانات الوظائف الأمريكية وتأثيرها المحتمل على الدولار"),
+            (("treasury", "yield"), "تحرك عوائد السندات الأمريكية وتأثيره على الدولار"),
         ]
-        all_news = []
-        for feed in feeds:
-            for item in self._fetch_rss_feed(feed, max_items=5):
-                text = (self._safe_str(item.get("title")) + " " + self._safe_str(item.get("description"))).lower()
-                if any(k in text for k in self.exclude_keywords):
-                    continue
-                if any(k in text for k in self.required_keywords):
-                    pub = self._parse_published_time(item.get("published_at"))
-                    if pub:
-                        age = (datetime.now(timezone.utc) - pub.astimezone(timezone.utc)).total_seconds()
-                        if 0 <= age <= hours * 3600:
-                            all_news.append(item)
-        seen, unique = set(), []
-        for item in all_news:
-            key = self._radar_alert_fingerprint(item, "news")
-            if key not in seen:
-                seen.add(key)
-                unique.append(item)
-        return unique
+        for keys, title in mappings:
+            if all(k in raw for k in keys):
+                return title
+        return self._safe_str(item.get("title"))[:180] or "حدث اقتصادي مرتبط بسوق العملات"
 
-    def _radar_price_change_since_news(self, asset: str, candles: Dict, age_seconds: float) -> Optional[Dict]:
-        """يقيس الحركة من قرب لحظة الخبر إلى الآن، لا حركة عشوائية قبل الخبر."""
-        data = candles.get(asset) if isinstance(candles, dict) else None
-        closes = data.get("closes", []) if isinstance(data, dict) else []
-        if len(closes) < 8:
-            return None
+    def _format_price(self, asset: str, value: Any) -> str:
+        if not isinstance(value, (int, float)):
+            return "غير متاح"
+        decimals = 5 if asset == "eurusd" else 3
+        return f"{value:.{decimals}f}"
+
+    def _fallback_report(self, analyzed_news, eurusd_price=None, usdjpy_price=None, reason="no_significant_news", fetch_stats=None) -> str:
         try:
-            age_min = max(1, int(round(age_seconds / 60.0)))
-            # نحتاج شمعة قبل الخبر تقريباً + شمعة عند/بعد الخبر.
-            idx = min(age_min, len(closes) - 2)
-            before_news = float(closes[-idx - 1])
-            current = float(closes[-1])
-            if before_news <= 0 or current <= 0:
-                return None
-            change = (current - before_news) / before_news * 100.0
-            return {"before": before_news, "current": current, "change_pct": change, "age_min": age_min}
-        except (TypeError, ValueError, IndexError):
-            return None
+            significant = [x for x in (analyzed_news or []) if x and x.get("is_significant") and x.get("asset") in FOREX_ASSETS]
+            lines = ["🧠 تقرير تولين الاستخباراتي — Forex", ""]
+            if significant:
+                lines.append("📰 الأخبار المؤثرة المقاسة سعرياً")
+                for x in sorted(significant, key=lambda z: abs(float(z.get("change_pct") or 0)), reverse=True)[:6]:
+                    asset = x["asset"]
+                    label = FOREX_LABELS[asset]
+                    change = x.get("change_pct")
+                    direction = "ارتفع" if change > 0 else "انخفض" if change < 0 else "تحرك بشكل محدود"
+                    p0 = x.get(f"{asset}_price_at_news")
+                    plast = x.get(f"{asset}_price_60min") if isinstance(x.get(f"{asset}_price_60min"), (int, float)) else x.get(f"{asset}_price_15min")
+                    title = self._arabic_title(x)
+                    if isinstance(p0, (int, float)) and isinstance(plast, (int, float)):
+                        lines.append(f"• {label}: {title}. بعد الخبر {direction} السعر من {self._format_price(asset,p0)} إلى {self._format_price(asset,plast)} ({change:+.3f}%).")
+                    else:
+                        lines.append(f"• {label}: {title}. {direction} السعر بنحو {abs(change):.3f}%.")
+                lines.extend(["", "⚖️ الحكم النهائي"])
+                for asset in FOREX_ASSETS:
+                    rows = [x for x in significant if x.get("asset") == asset]
+                    if not rows:
+                        continue
+                    vals = [float(x["change_pct"]) for x in rows if isinstance(x.get("change_pct"), (int, float))]
+                    if not vals:
+                        continue
+                    avg = sum(vals) / len(vals)
+                    label = FOREX_LABELS[asset]
+                    trend = "يميل إلى الصعود" if avg >= IMPACT_THRESHOLDS["medium"] else "يميل إلى الهبوط" if avg <= -IMPACT_THRESHOLDS["medium"] else "متباين/محايد"
+                    lines.append(f"• {label}: {trend} وفق الحركة السعرية المقاسة بعد الأخبار.")
+            else:
+                stats = fetch_stats or self._last_fetch_stats or {}
+                if stats.get("sources_total") and not stats.get("sources_ok"):
+                    lines.append("⚠️ تعذر الوصول إلى مصادر الأخبار في هذه الدورة، لذلك لا يمكن إصدار حكم استخباراتي موثوق.")
+                else:
+                    lines.append("📭 لم يظهر خبر اقتصادي أو جيوسياسي مرتبط مباشرة بـ EUR/USD أو USD/JPY ورافقته حركة سعرية كافية للقياس.")
+                lines.extend(["", "⚖️ الحكم النهائي: لا توجد أدلة خبرية وسعرية كافية لاتجاه واضح حالياً."])
+            lines.extend([
+                "",
+                "💡 يعتمد الحكم على الخبر المرتبط بالزوج وحركة السعر الفعلية بعده، ولا يفترض السببية من التزامن وحده.",
+                "💙 هذا المحرك استشاري ولا يغيّر استراتيجية SuperTrend/VPT."
+            ])
+            return "\n".join(lines).strip()
+        except Exception as exc:
+            logging.error(f"❌ Tona Forex fallback report failed: {exc}")
+            return "🧠 تقرير تولين الاستخباراتي — Forex\n\nتعذر توليد التقرير حالياً."
 
-    def evaluate_breaking_news(self, news: Dict, candles_data: Dict = None) -> Optional[Dict]:
-        """يفحص خبرًا واحدًا ويعيد التحذير فقط إذا اجتاز شروط الخبر والسعر والتزامن."""
-        if not isinstance(news, dict):
-            return None
-        pub = self._parse_published_time(news.get("published_at"))
-        if not pub:
-            return None
-        age = (datetime.now(timezone.utc) - pub.astimezone(timezone.utc)).total_seconds()
-        if age < -120 or age > 15 * 60:
-            return None
+    def _groq_report(self, analyzed_news: List[Dict], eurusd_price=None, usdjpy_price=None, fetch_stats=None) -> str:
+        if not self.groq_api_key:
+            return self._fallback_report(analyzed_news, eurusd_price, usdjpy_price, "missing_groq_api_key", fetch_stats)
 
-        candidates = []
-        for asset in ("eurusd", "usdjpy"):
-            window = self._radar_price_change_since_news(asset, candles_data or {}, max(age, 0.0))
-            if not window:
+        rows = []
+        for x in analyzed_news or []:
+            if x.get("asset") not in FOREX_ASSETS or not x.get("is_significant"):
                 continue
-            # التزامن هنا مرتبط مباشرة بعمر الخبر والحركة منذ قرب لحظة نشره.
-            timing = max(0.0, 1.0 - max(age, 0.0) / 900.0)
-            score, meta = self._radar_news_score(news, asset, window["change_pct"], timing)
-            if abs(window["change_pct"]) < self.RADAR_MIN_ABSOLUTE_MOVE_PCT[asset]:
-                continue
-            # اتجاه الخبر: نبحث عن إشارات الاتجاه الواضحة فقط؛ الخبر المحايد لا يكفي.
-            text = (self._safe_str(news.get("title")) + " " + self._safe_str(news.get("description"))).lower()
-            bullish_terms = ["cut production", "supply disruption", "attack", "closure", "closed", "sanction", "embargo", "war", "إغلاق", "هجوم", "عقوبات", "حظر", "توقف", "تعطل", "خفض الإنتاج"]
-            bearish_terms = ["increase production", "supply restored", "ceasefire", "production rises", "استئناف الإمدادات", "زيادة الإنتاج", "وقف إطلاق النار"]
-            bull = sum(1 for x in bullish_terms if x in text)
-            bear = sum(1 for x in bearish_terms if x in text)
-            expected = "up" if bull > bear else "down" if bear > bull else None
-            actual = "up" if window["change_pct"] > 0 else "down"
-            direction_match = expected is not None and expected == actual
-            if direction_match:
-                score = min(100, score + 15)
-                meta["reasons"].append("اتجاه الخبر متوافق مع حركة السعر")
-            elif expected is not None:
-                score = max(0, score - 15)
-                meta["reasons"].append("اتجاه الخبر لا يتوافق مع حركة السعر")
-
-            if score >= self.RADAR_STRONG_SCORE and direction_match:
-                candidates.append({
-                    "asset": asset,
-                    "score": score,
-                    "change_pct": window["change_pct"],
-                    "price_before": window["before"],
-                    "price_current": window["current"],
-                    "expected_direction": expected,
-                    "timing_score": timing,
-                    "source": news.get("source", "غير معروف"),
-                    "title": news.get("title", ""),
-                    "title_ar": news.get("title_ar", ""),
-                    "published_at": news.get("published_at", ""),
-                    "url": news.get("url", ""),
-                    "reasons": meta["reasons"],
-                    "fingerprint": self._radar_alert_fingerprint(news, asset),
-                    "requires_confirmation": True,
-                })
-        if not candidates:
-            return None
-        return max(candidates, key=lambda x: x["score"])
-
-    def format_breaking_alert(self, alert: Dict, open_trades: Dict = None) -> str:
-        """صياغة قصيرة ومختلفة جذريًا عن التقرير الاستخباراتي اليدوي."""
-        asset_label = "النفط" if alert.get("asset") == "oil" else "الفضة"
-        direction = "ارتفاع" if alert.get("change_pct", 0) > 0 else "هبوط"
-        p0 = alert.get("price_before", 0)
-        p1 = alert.get("price_current", 0)
-        change = alert.get("change_pct", 0)
-        risk_line = ""
-        trades = open_trades or {}
-        trade = trades.get(alert.get("asset")) if isinstance(trades, dict) else None
-        if isinstance(trade, dict):
-            side = str(trade.get("type", "")).upper()
-            if (change > 0 and side == "SELL") or (change < 0 and side == "BUY"):
-                risk_line = "\n⚠️ لديك صفقة مفتوحة في الاتجاه المعاكس للحركة الحالية؛ راجعها فورًا وفق إدارة المخاطر."
-
-        persistence = "يرجّح استمرار الحركة مؤقتًا مع ضرورة مراقبة التثبيت" if alert.get("timing_score", 0) >= 0.75 else "استمرار الحركة غير مؤكد وتحتاج إلى متابعة التأكيد"
-        reasons = "، ".join(alert.get("reasons", [])[:4])
-        return (
-            f"🚨 **تحذير عاجل — {asset_label}**\n\n"
-            f"تحرك {asset_label} من {p0:.3f} إلى {p1:.3f}، أي {direction} بنسبة {abs(change):.2f}%، "
-            f"بالتزامن مع خبر: **{self._safe_str(alert.get('title_ar') or alert.get('title'))[:180]}**.\n\n"
-            f"🧠 تقييم Tona: {alert.get('score', 0)}/100\n"
-            f"📰 المصدر: {self._safe_str(alert.get('source', 'غير معروف'))}\n"
-            f"🔎 أسباب التأكيد: {reasons}\n\n"
-            f"📈 التوقع القريب: {persistence}.\n"
-            f"{risk_line}\n\n"
-            f"💙 **Tona Intelligence**"
-        )
-
-    def run_breaking_news_radar(self, notify_callback=None, open_trades=None) -> Optional[Dict]:
-        """دورة رادار خفيفة واحدة. يمكن استدعاؤها كل 15 دقيقة من المضيف."""
+            asset = x["asset"]
+            rows.append(
+                f"الزوج={FOREX_LABELS[asset]} | الخبر={self._arabic_title(x)} | "
+                f"التغير={float(x.get('change_pct') or 0):+.3f}% | "
+                f"الاتجاه={x.get('direction')} | السببية={x.get('causality')}"
+            )
+        data_text = "\n".join(rows) if rows else "لا توجد أخبار مؤثرة مقاسة سعرياً."
+        prompt = f"""أنت طبقة صياغة لمحرك استخبارات فوركس. لا تخترع أخباراً أو أرقاماً أو أسباباً.\n"
+""الأصول الوحيدة هي EUR/USD وUSD/JPY.\n"
+"استخدم فقط البيانات التالية، ووضح أن السببية غير مثبتة عندما تكون كذلك.\n"
+"EUR/USD الحالي={self._format_price('eurusd', eurusd_price)}\n"
+"USD/JPY الحالي={self._format_price('usdjpy', usdjpy_price)}\n"
+"البيانات:\n{data_text}\n"
+"اكتب تقريراً عربياً واضحاً ومختصراً، ثم حكماً منفصلاً لكل زوج: صاعد/هابط/محايد."""
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages": [
+                {"role": "system", "content": "أنت محرر استخباراتي مالي دقيق؛ لا تخترع أي معلومة."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1200,
+        }
         try:
+            response = requests.post(
+                self.api_url,
+                headers={"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25,
+            )
+            if response.status_code == 200:
+                body = response.json()
+                choice = (body.get("choices") or [{}])[0]
+                content = self._safe_str((choice.get("message") or {}).get("content")).strip()
+                if self._complete_report_text(content, choice.get("finish_reason")):
+                    self._last_report_status = {"provider": "groq", "reason": "success"}
+                    return content
+            logging.warning(f"⚠️ Tona Forex Groq failed HTTP {response.status_code}")
+        except Exception as exc:
+            logging.warning(f"⚠️ Tona Forex Groq exception: {exc}")
+        self._last_report_status = {"provider": "fallback", "reason": "groq_failed"}
+        return self._fallback_report(analyzed_news, eurusd_price, usdjpy_price, "groq_failed", fetch_stats)
+
+    def _complete_report_text(self, content, finish_reason=None):
+        content = self._safe_str(content).strip()
+        if not content or finish_reason in {"length", "max_tokens"}:
+            return False
+        return len(re.sub(r"\s+", " ", content)) >= 80
+
+    def generate_elite_analysis(self, news_list=None):
+        """إنشاء تقرير استخباراتي Forex مستقل عن ماسح SuperTrend/VPT."""
+        try:
+            news_list = self.fetch_targeted_intelligence(hours=NEWS_LOOKBACK_HOURS) if news_list is None else (news_list if isinstance(news_list, list) else [])
             candles = {}
-            if self.candle_fetcher:
-                for asset, symbol in (("oil", "USOIL_USDT"), ("silver", "SILVER_USDT")):
-                    try:
-                        data = self.candle_fetcher(symbol, "Min1", 8)
-                        if data:
-                            candles[asset] = data
-                    except Exception as e:
-                        logging.debug(f"Radar candle fetch {asset}: {e}")
-            if not candles:
-                return None
-
-            news = self._fetch_radar_news(hours=1)
-            if not news:
-                return None
-
-            # الأخبار الأحدث أولًا؛ لا نمرر كل الأخبار إلى النموذج.
-            alerts = []
-            for item in sorted(news, key=lambda x: str(x.get("published_at", "")), reverse=True)[:20]:
-                alert = self.evaluate_breaking_news(item, candles)
-                if alert:
-                    alerts.append(alert)
-
-            if not alerts:
-                return None
-            alert = max(alerts, key=lambda x: x.get("score", 0))
-            now_ts = time.time()
-            with self._radar_lock:
-                self._radar_alert_times = [t for t in self._radar_alert_times if now_ts - t < 3600]
-                fingerprint = alert.get("fingerprint")
-                if fingerprint and now_ts - self._radar_alert_history.get(fingerprint, 0) < self.RADAR_DUPLICATE_COOLDOWN_SECONDS:
-                    return None
-                if len(self._radar_alert_times) >= self.RADAR_MAX_ALERTS_PER_HOUR:
-                    logging.warning("⚠️ Radar alert rate limit reached; suppressing alert")
-                    return None
-                if fingerprint:
-                    self._radar_alert_history[fingerprint] = now_ts
-                self._radar_alert_times.append(now_ts)
-            self.store_active_news({**alert, "is_significant": True, "direction": "صعود" if alert["change_pct"] > 0 else "هبوط", "classification": "تحذير عاجل", "change_pct": alert["change_pct"]})
-            message = self.format_breaking_alert(alert, open_trades=open_trades)
-            alert["message"] = message
-            if callable(notify_callback):
+            for asset in FOREX_ASSETS:
                 try:
-                    notify_callback(message, alert)
-                except TypeError:
-                    notify_callback(message)
-            return alert
-        except Exception as e:
-            logging.error(f"❌ Breaking News Radar failed: {e}")
-            logging.debug(traceback.format_exc())
-            return None
+                    if self.candle_fetcher:
+                        data = self.candle_fetcher(FOREX_SYMBOLS[asset], "Min1", 420)
+                    else:
+                        from main import get_forex_candles
+                        data = get_forex_candles(FOREX_SYMBOLS[asset], "Min1", 420)
+                    if data and data.get("closes"):
+                        candles[asset] = data
+                except Exception as exc:
+                    logging.warning(f"⚠️ Tona Forex: فشل تحميل بيانات {FOREX_LABELS[asset]}: {exc}")
 
-    def start_breaking_news_radar(self, notify_callback=None, open_trades_provider=None, interval_seconds=None):
-        """تشغيل عامل واحد دائم؛ الافتراضي 15 دقيقة، بدون إنشاء عامل لكل دورة."""
-        if getattr(self, "_radar_thread", None) and self._radar_thread.is_alive():
+            analyzed = []
+            for item in news_list[:80]:
+                if isinstance(item, dict) and self._is_target_news(item):
+                    analyzed.append(self.analyze_news_impact(item, candles))
+
+            eurusd_price = (candles.get("eurusd") or {}).get("closes", [None])[-1]
+            usdjpy_price = (candles.get("usdjpy") or {}).get("closes", [None])[-1]
+
+            # تخزين الأحداث القوية فقط.
+            for impact in analyzed:
+                if impact.get("is_significant"):
+                    self.store_active_news(impact)
+
+            # لا نعرض إلا ما تم قياس أثره فعلياً.
+            significant = [x for x in analyzed if x.get("is_significant") and x.get("asset") in FOREX_ASSETS]
+            if self.groq_api_key and significant:
+                return self._groq_report(significant, eurusd_price, usdjpy_price, self._last_fetch_stats)
+            self._last_report_status = {"provider": "fallback", "reason": "no_groq_or_no_significant_news"}
+            return self._fallback_report(analyzed, eurusd_price, usdjpy_price, "no_significant_news", self._last_fetch_stats)
+        except Exception as exc:
+            logging.error(f"❌ Tona Forex elite analysis failed: {exc}")
+            logging.debug(traceback.format_exc())
+            return "🧠 تقرير تولين الاستخباراتي — Forex\n\nتعذر توليد التقرير حالياً، لذلك لا يوجد حكم استخباراتي موثوق في هذه الدورة."
+
+    # ------------------------------------------------------------------
+    # Breaking News Radar — مستقل عن دورة 60 ثانية
+    # ------------------------------------------------------------------
+    def _radar_once(self, notify_callback=None, open_trades_provider=None):
+        try:
+            news = self.fetch_targeted_intelligence(hours=2)
+            if not news:
+                return
+            candles = {}
+            for asset in FOREX_ASSETS:
+                try:
+                    if self.candle_fetcher:
+                        data = self.candle_fetcher(FOREX_SYMBOLS[asset], "Min1", 180)
+                    else:
+                        from main import get_forex_candles
+                        data = get_forex_candles(FOREX_SYMBOLS[asset], "Min1", 180)
+                    if data and data.get("closes"):
+                        candles[asset] = data
+                except Exception:
+                    pass
+
+            open_trades = open_trades_provider() if callable(open_trades_provider) else {}
+            for item in news[:50]:
+                pub = self._parse_published_time(item.get("published_at"))
+                if pub is None:
+                    continue
+                pub_utc = pub.replace(tzinfo=timezone.utc) if pub.tzinfo is None else pub.astimezone(timezone.utc)
+                age = (datetime.now(timezone.utc) - pub_utc).total_seconds() / 60
+                if age < 0 or age > 45:
+                    continue
+                impact = self.analyze_news_impact(item, candles)
+                if not impact.get("is_significant"):
+                    continue
+                key = hashlib.sha256((self._safe_str(item.get("title")) + str(impact.get("asset"))).encode("utf-8")).hexdigest()
+                with self._radar_lock:
+                    if key in self._radar_alert_history:
+                        continue
+                    self._radar_alert_history[key] = time.time()
+                asset = impact.get("asset")
+                label = FOREX_LABELS.get(asset, asset)
+                msg = (
+                    f"🚨 Tona Forex Breaking Radar\n\n"
+                    f"📌 الزوج: {label}\n"
+                    f"📰 الخبر: {self._arabic_title(impact)}\n"
+                    f"📊 الحركة المقاسة بعد الخبر: {impact.get('change_pct', 0):+.3f}% ({impact.get('direction')})\n"
+                    f"⚠️ السببية: {impact.get('causality', 'غير مثبتة')}\n"
+                    f"💙 هذا تنبيه استخباراتي ولا يغيّر استراتيجية SuperTrend/VPT."
+                )
+                if asset in open_trades:
+                    msg += "\n🔎 توجد صفقة افتراضية مفتوحة على هذا الزوج؛ يجب مراقبتها فقط، دون تعديل آلي للاستراتيجية."
+                if callable(notify_callback):
+                    notify_callback(msg, impact)
+        except Exception as exc:
+            logging.warning(f"⚠️ Tona Forex Radar cycle failed: {exc}")
+
+    def start_breaking_news_radar(self, notify_callback=None, open_trades_provider=None, interval_seconds=1800):
+        """بدء عامل واحد فقط للرادار؛ لا يعمل كل 60 ثانية."""
+        if self._radar_thread and self._radar_thread.is_alive():
             return self._radar_thread
-        interval = int(interval_seconds or self.RADAR_INTERVAL_SECONDS)
-        self._radar_stop = threading.Event()
+        interval_seconds = max(300, int(interval_seconds or 1800))
+        self._radar_stop.clear()
 
         def worker():
-            logging.info(f"🚨 Tona Breaking News Radar started (interval={interval}s)")
+            logging.info(f"🚨 Tona Forex Breaking Radar بدأ (كل {interval_seconds // 60} دقيقة)")
             while not self._radar_stop.is_set():
-                try:
-                    trades = open_trades_provider() if callable(open_trades_provider) else None
-                    self.run_breaking_news_radar(notify_callback=notify_callback, open_trades=trades)
-                except Exception as e:
-                    logging.error(f"❌ Radar worker error: {e}")
-                self._radar_stop.wait(interval)
+                self._radar_once(notify_callback, open_trades_provider)
+                self._radar_stop.wait(interval_seconds)
+            logging.info("🛑 Tona Forex Breaking Radar توقف")
 
-        self._radar_thread = threading.Thread(target=worker, name="TonaBreakingNewsRadar", daemon=True)
+        self._radar_thread = threading.Thread(target=worker, name="TonaForexBreakingRadar", daemon=True)
         self._radar_thread.start()
         return self._radar_thread
 
     def stop_breaking_news_radar(self):
-        stop = getattr(self, "_radar_stop", None)
-        if stop:
-            stop.set()
+        self._radar_stop.set()
 
-    # =====================================================================
-    # 🚀 الدالة الرئيسية (محسّنة مع كاش الشموع وفحص الحداثة)
-    # =====================================================================
-
-    def generate_elite_analysis(self, news_list=None):
-        """الدورة الرئيسية: جمع -> تحقق زمني -> قياس تأثير -> صياغة، مع تشخيص كامل."""
-        try:
-            supplied = news_list is not None
-            if news_list is None:
-                news_list = self.fetch_targeted_intelligence(hours=10)
-            elif not isinstance(news_list, list):
-                news_list = []
-
-            if not news_list:
-                self._last_report_status = {"provider": "fallback", "reason": "no_news_returned"}
-                return self._fallback_report([], 0, 0, reason="no_news_returned", fetch_stats=self._last_fetch_stats)
-
-            candles_data = {}
-            try:
-                from main import get_forex_candles as get_mexc_candles
-                oil_data = get_mexc_candles("EURUSD", "Min1", 420)
-                silver_data = get_mexc_candles("USDJPY", "Min1", 420)
-                if oil_data and oil_data.get("closes"): candles_data["oil"] = oil_data
-                if silver_data and silver_data.get("closes"): candles_data["silver"] = silver_data
-                self._last_candles_data = candles_data
-                logging.info(f"📊 Tona: تم تحميل الشموع | oil={bool(candles_data.get('oil'))} silver={bool(candles_data.get('silver'))}")
-            except Exception as e:
-                logging.warning(f"⚠️ Tona: فشل تحميل الشموع: {e}")
-
-            analyzed = []
-            now_utc = datetime.now(timezone.utc)
-            skipped_old = skipped_future = skipped_bad_time = 0
-
-            for news in news_list[:60]:
-                if not news:
-                    continue
-                pub_time = self._parse_published_time(news.get("published_at"))
-                if pub_time is None:
-                    skipped_bad_time += 1
-                    continue
-                pub_utc = pub_time.replace(tzinfo=timezone.utc) if pub_time.tzinfo is None else pub_time.astimezone(timezone.utc)
-                age_hours = (now_utc - pub_utc).total_seconds() / 3600
-                if age_hours < -0.10:
-                    skipped_future += 1
-                    continue
-                if age_hours > NEWS_LOOKBACK_HOURS:
-                    skipped_old += 1
-                    continue
-                try:
-                    impact = self.analyze_news_impact(news, candles_data=candles_data)
-                    impact["news_age_minutes"] = round(max(0, age_hours * 60), 1)
-                    analyzed.append(impact)
-                    if impact.get("is_significant", False):
-                        self.store_active_news(impact)
-                except Exception as e:
-                    logging.warning(f"⚠️ Tona: فشل تحليل خبر '{self._safe_str(news.get('title'))[:80]}': {e}")
-
-            self._last_fetch_stats["analyzed_items"] = len(analyzed)
-            self._last_fetch_stats["skipped_old"] = skipped_old
-            self._last_fetch_stats["skipped_future"] = skipped_future
-            self._last_fetch_stats["skipped_bad_time"] = skipped_bad_time
-            logging.info(f"🧠 Tona analysis: input={len(news_list)} analyzed={len(analyzed)} significant={sum(1 for n in analyzed if n.get('is_significant'))} old={skipped_old} future={skipped_future}")
-
-            oil_price = 0; silver_price = 0
-            if candles_data.get("oil", {}).get("closes"): oil_price = candles_data["oil"]["closes"][-1]
-            if candles_data.get("silver", {}).get("closes"): silver_price = candles_data["silver"]["closes"][-1]
-
-            # حتى عند عدم وجود خبر مؤثر، نرسل الحالة إلى النموذج بدلاً من إخفائها خلف fallback.
-            return self._groq_report(analyzed, oil_price, silver_price, fetch_stats=self._last_fetch_stats)
-
-        except Exception as e:
-            logging.error(f"❌ فشل توليد التقرير الاستخباراتي: {e}")
-            logging.debug(traceback.format_exc())
-            self._last_report_status = {"provider": "error", "reason": f"{type(e).__name__}: {e}"}
-            return f"⚠️ حدث خطأ أثناء توليد التقرير الاستخباراتي: {str(e)}"
-
-
-
-# =====================================================================
-# 🚀 دوال مساعدة للاستخدام الخارجي (باستخدام مثيل واحد)
-# =====================================================================
 
 def get_engine() -> TonaEliteEngine:
-    """الحصول على مثيل واحد من المحرك (Singleton)"""
     global _ENGINE_INSTANCE
     if _ENGINE_INSTANCE is None:
         _ENGINE_INSTANCE = TonaEliteEngine()
@@ -1301,29 +842,23 @@ def get_engine() -> TonaEliteEngine:
 
 def generate_intelligence_report():
     try:
-        engine = get_engine()
-        return engine.generate_elite_analysis()
-    except Exception as e:
-        logging.error(f"❌ فشل في generate_intelligence_report: {e}")
-        logging.debug(traceback.format_exc())
-        return f"⚠️ حدث خطأ أثناء توليد التقرير: {str(e)}"
+        return get_engine().generate_elite_analysis()
+    except Exception as exc:
+        logging.error(f"❌ فشل في generate_intelligence_report: {exc}")
+        return "⚠️ حدث خطأ أثناء توليد التقرير الاستخباراتي."
 
 
 def get_active_news(asset_type: str = None) -> List[Dict]:
-    """استرجاع الأخبار المؤثرة النشطة (باستخدام المثيل الوحيد)"""
     try:
-        engine = get_engine()
-        return engine.get_active_news(asset_type)
-    except Exception as e:
-        logging.error(f"❌ فشل في get_active_news: {e}")
+        return get_engine().get_active_news(asset_type)
+    except Exception as exc:
+        logging.error(f"❌ فشل في get_active_news: {exc}")
         return []
 
 
 def get_strongest_news(asset_type: str = None) -> Optional[Dict]:
-    """استرجاع أقوى خبر مؤثر حالياً (باستخدام المثيل الوحيد)"""
     try:
-        engine = get_engine()
-        return engine.get_strongest_news(asset_type)
-    except Exception as e:
-        logging.error(f"❌ فشل في get_strongest_news: {e}")
+        return get_engine().get_strongest_news(asset_type)
+    except Exception as exc:
+        logging.error(f"❌ فشل في get_strongest_news: {exc}")
         return None
